@@ -289,7 +289,7 @@ private fun HonyukaApp(
             geminiApiKey = state.geminiApiKey,
             deepLApiKey = state.deepLApiKey,
             onPickRoot = onPickRoot,
-            onRefresh = viewModel::refresh,
+            onRefresh = { viewModel.refresh(force = true) },
             onSourceSelected = viewModel::onSourceLanguageSelected,
             onTargetSelected = viewModel::onTargetLanguageSelected,
             onEngineSelected = viewModel::onTranslationEngineSelected,

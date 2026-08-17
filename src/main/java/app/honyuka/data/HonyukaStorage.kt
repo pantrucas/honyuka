@@ -5,10 +5,26 @@ import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import app.honyuka.model.ChapterEntry
 import app.honyuka.model.PageTranslation
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.encodeToString
 import java.io.OutputStream
 import java.util.Locale
+
+sealed interface ScanUpdate {
+    data class Batch(
+        val sourceName: String,
+        val mangaName: String,
+        val chapters: List<ChapterEntry>,
+        val totalSoFar: Int,
+        val progress: Float,
+    ) : ScanUpdate
+
+    data class Done(val total: Int) : ScanUpdate
+}
 
 class HonyukaStorage(
     private val context: Context,
@@ -22,52 +38,132 @@ class HonyukaStorage(
     fun rootSummary(): String? = preferences.rootUri()?.toString()
 
     fun hasCompatibleRoot(): Boolean {
-        val root = rootDirectory() ?: return false
-        return root.findFile(DOWNLOADS_DIR)?.isDirectory == true
+        val reader = treeReader() ?: return false
+        return reader.listChildren(reader.rootDocumentId())
+            .any { it.isDirectory && it.name == DOWNLOADS_DIR }
     }
 
-    fun scanChapters(): List<ChapterEntry> {
-        val root = rootDirectory() ?: return emptyList()
-        val downloadsDir = root.findFile(DOWNLOADS_DIR) ?: return emptyList()
-        val translationsDir = root.findFile(TRANSLATIONS_DIR)
+    /**
+     * Walks the reader downloads tree, emitting one batch per manga so the list can populate while
+     * the scan is still running.
+     *
+     * Each directory is listed exactly once. Whether a chapter is already translated is answered
+     * from two in-memory sets — its siblings in the manga folder, and the JSON files under
+     * `translations/<source>/<manga>` — so the inner loop issues no queries at all. The total cost
+     * is `3 + 2 * (sources + manga)` queries instead of growing with the chapter count.
+     */
+    fun scanChapters(): Flow<ScanUpdate> = flow {
+        val reader = treeReader() ?: run {
+            emit(ScanUpdate.Done(0))
+            return@flow
+        }
 
-        return downloadsDir.listFiles()
-            .filter { it.isDirectory && !it.name.isNullOrBlank() }
-            .sortedByNaturalName()
-            .flatMap { sourceDir ->
-                sourceDir.listFiles()
-                    .filter { it.isDirectory && !it.name.isNullOrBlank() }
-                    .sortedByNaturalName()
-                    .flatMap { mangaDir ->
-                        mangaDir.listFiles()
-                            .filter { isVisibleChapterContainer(it) }
-                            .sortedByNaturalName()
-                            .map { chapterFile ->
-                                val baseName = chapterFile.name!!.removeSuffix(".cbz")
-                                ChapterEntry(
-                                    sourceName = sourceDir.name!!,
-                                    mangaName = mangaDir.name!!,
-                                    chapterDisplayName = baseName,
-                                    chapterBaseName = baseName,
-                                    chapterUri = chapterFile.uri,
-                                    thumbnailUri = chapterThumbnailUri(chapterFile),
-                                    isCbz = chapterFile.isFile,
-                                    translated = resolveTranslatedChapterDocument(
-                                        sourceName = sourceDir.name!!,
-                                        mangaName = mangaDir.name!!,
-                                        chapterBaseName = baseName,
-                                        isCbz = chapterFile.isFile,
-                                    )?.exists() == true ||
-                                        translationFileFor(
-                                            translationsDir = translationsDir,
-                                            sourceName = sourceDir.name!!,
-                                            mangaName = mangaDir.name!!,
-                                            chapterBaseName = baseName,
-                                        )?.exists() == true,
-                                )
-                            }
-                    }
+        val rootChildren = reader.listChildren(reader.rootDocumentId())
+        val downloadsId = rootChildren
+            .firstOrNull { it.isDirectory && it.name == DOWNLOADS_DIR }
+            ?.documentId
+            ?: run {
+                emit(ScanUpdate.Done(0))
+                return@flow
             }
+
+        val translationSources = rootChildren
+            .firstOrNull { it.isDirectory && it.name == TRANSLATIONS_DIR }
+            ?.let { reader.listChildren(it.documentId) }
+            ?.filter { it.isDirectory }
+            ?.associate { it.name to it.documentId }
+            .orEmpty()
+
+        val sourceDirs = reader.listChildren(downloadsId)
+            .filter { it.isDirectory && it.name.isNotBlank() }
+            .sortedByNaturalName()
+
+        var total = 0
+        sourceDirs.forEachIndexed { sourceIndex, sourceDir ->
+            val translatedMangaDirs = translationSources[sourceDir.name]
+                ?.let { reader.listChildren(it) }
+                ?.filter { it.isDirectory }
+                ?.associate { it.name to it.documentId }
+                .orEmpty()
+
+            val mangaDirs = reader.listChildren(sourceDir.documentId)
+                .filter { it.isDirectory && it.name.isNotBlank() }
+                .sortedByNaturalName()
+
+            mangaDirs.forEachIndexed { mangaIndex, mangaDir ->
+                val children = reader.listChildren(mangaDir.documentId)
+                val siblingNames = children.mapTo(HashSet(children.size)) { it.name }
+                val translationFileNames = translatedMangaDirs[mangaDir.name]
+                    ?.let { reader.listChildren(it) }
+                    ?.mapTo(HashSet()) { it.name }
+                    .orEmpty()
+
+                var thumbnailAttempts = 0
+                var thumbnailFound = false
+                val chapters = children
+                    .filter(::isVisibleChapterContainer)
+                    .sortedByNaturalName()
+                    .map { chapterEntry ->
+                        val baseName = chapterEntry.name.removeSuffix(CBZ_EXTENSION)
+                        val translatedName = translatedChapterName(baseName)
+                        // The UI only ever renders one thumbnail per manga, so the first chapter
+                        // that yields an image is enough. Empty folders are retried a few times.
+                        val thumbnailUri = if (
+                            chapterEntry.isDirectory &&
+                            !thumbnailFound &&
+                            thumbnailAttempts < MAX_THUMBNAIL_ATTEMPTS
+                        ) {
+                            thumbnailAttempts++
+                            firstImageUri(reader, chapterEntry.documentId)?.also { thumbnailFound = true }
+                        } else {
+                            null
+                        }
+                        ChapterEntry(
+                            sourceName = sourceDir.name,
+                            mangaName = mangaDir.name,
+                            chapterDisplayName = baseName,
+                            chapterBaseName = baseName,
+                            chapterUri = reader.documentUri(chapterEntry.documentId),
+                            thumbnailUri = thumbnailUri,
+                            isCbz = !chapterEntry.isDirectory,
+                            translated = translatedName in siblingNames ||
+                                "$translatedName$CBZ_EXTENSION" in siblingNames ||
+                                "${buildValidFilename(baseName)}.json" in translationFileNames,
+                        )
+                    }
+
+                total += chapters.size
+                if (chapters.isNotEmpty()) {
+                    emit(
+                        ScanUpdate.Batch(
+                            sourceName = sourceDir.name,
+                            mangaName = mangaDir.name,
+                            chapters = chapters,
+                            totalSoFar = total,
+                            progress = scanProgress(sourceIndex, sourceDirs.size, mangaIndex, mangaDirs.size),
+                        ),
+                    )
+                }
+            }
+        }
+
+        emit(ScanUpdate.Done(total))
+    }.flowOn(Dispatchers.IO)
+
+    private fun treeReader(): SafTreeReader? {
+        val rootUri = preferences.rootUri() ?: return null
+        return SafTreeReader(context.contentResolver, rootUri)
+    }
+
+    private fun scanProgress(
+        sourceIndex: Int,
+        sourceCount: Int,
+        mangaIndex: Int,
+        mangaCount: Int,
+    ): Float {
+        if (sourceCount == 0) return 1f
+        val withinSource = if (mangaCount == 0) 1f else (mangaIndex + 1).toFloat() / mangaCount
+        return ((sourceIndex + withinSource) / sourceCount).coerceIn(0f, 1f)
     }
 
     fun resolveChapterDocument(chapter: ChapterEntry): DocumentFile? {
@@ -193,18 +289,6 @@ class HonyukaStorage(
         return DocumentFile.fromTreeUri(context, rootUri)
     }
 
-    private fun translationFileFor(
-        translationsDir: DocumentFile?,
-        sourceName: String,
-        mangaName: String,
-        chapterBaseName: String,
-    ): DocumentFile? {
-        return translationsDir
-            ?.findFile(sourceName)
-            ?.findFile(mangaName)
-            ?.findFile("${buildValidFilename(chapterBaseName)}.json")
-    }
-
     fun resolveTranslatedChapterDocument(chapter: ChapterEntry): DocumentFile? {
         return resolveTranslatedChapterDocument(
             sourceName = chapter.sourceName,
@@ -310,34 +394,26 @@ class HonyukaStorage(
         file.delete()
     }
 
-    private fun isSupportedChapterContainer(file: DocumentFile): Boolean {
-        val name = file.name?.lowercase(Locale.ROOT) ?: return false
-        return file.isDirectory || (file.isFile && name.endsWith(".cbz"))
+    private fun isSupportedChapterContainer(entry: SafEntry): Boolean {
+        if (entry.name.isBlank()) return false
+        return entry.isDirectory || entry.name.lowercase(Locale.ROOT).endsWith(CBZ_EXTENSION)
     }
 
-    private fun isVisibleChapterContainer(file: DocumentFile): Boolean {
-        if (!isSupportedChapterContainer(file)) return false
-        val name = file.name.orEmpty()
-        val baseName = name.removeSuffix(".cbz")
+    private fun isVisibleChapterContainer(entry: SafEntry): Boolean {
+        if (!isSupportedChapterContainer(entry)) return false
+        val baseName = entry.name.removeSuffix(CBZ_EXTENSION)
         return baseName != BACKUPS_DIR && !baseName.endsWith(TRANSLATED_SUFFIX)
     }
 
-    private fun chapterThumbnailUri(chapterFile: DocumentFile): Uri? {
-        if (!chapterFile.isDirectory) return null
-        return collectImagePages(chapterFile)
-            .sortedByNaturalName()
-            .firstOrNull()
-            ?.uri
-    }
-
-    private fun collectImagePages(directory: DocumentFile): List<DocumentFile> {
-        return directory.listFiles().flatMap { child ->
-            when {
-                child.isDirectory -> collectImagePages(child)
-                child.isFile && isImageName(child.name) -> listOf(child)
-                else -> emptyList()
-            }
+    private fun firstImageUri(reader: SafTreeReader, documentId: String, depth: Int = 1): Uri? {
+        val children = reader.listChildren(documentId).sortedByNaturalName()
+        children.firstOrNull { !it.isDirectory && isImageName(it.name) }
+            ?.let { return reader.documentUri(it.documentId) }
+        if (depth <= 0) return null
+        children.filter { it.isDirectory }.forEach { child ->
+            firstImageUri(reader, child.documentId, depth - 1)?.let { return it }
         }
+        return null
     }
 
     private fun isImageName(name: String?): Boolean {
@@ -375,36 +451,7 @@ class HonyukaStorage(
         const val BACKUPS_DIR = "__honyuka_backup__"
         const val LEGACY_BACKUPS_DIR = "honyuka_backups"
         const val TRANSLATED_SUFFIX = "_translated"
-    }
-}
-
-private fun List<DocumentFile>.sortedByNaturalName(): List<DocumentFile> {
-    return sortedWith { left, right ->
-        naturalCompare(left.name.orEmpty(), right.name.orEmpty())
-    }
-}
-
-private fun naturalCompare(left: String, right: String): Int {
-    val leftParts = Regex("(\\d+|\\D+)").findAll(left).map { it.value }.toList()
-    val rightParts = Regex("(\\d+|\\D+)").findAll(right).map { it.value }.toList()
-    val maxSize = maxOf(leftParts.size, rightParts.size)
-    for (index in 0 until maxSize) {
-        val a = leftParts.getOrNull(index) ?: return -1
-        val b = rightParts.getOrNull(index) ?: return 1
-        val result = when {
-            a.all(Char::isDigit) && b.all(Char::isDigit) -> compareDigitStrings(a, b)
-            else -> a.compareTo(b, ignoreCase = true)
-        }
-        if (result != 0) return result
-    }
-    return 0
-}
-
-private fun compareDigitStrings(left: String, right: String): Int {
-    val normalizedLeft = left.trimStart('0').ifEmpty { "0" }
-    val normalizedRight = right.trimStart('0').ifEmpty { "0" }
-    return when {
-        normalizedLeft.length != normalizedRight.length -> normalizedLeft.length.compareTo(normalizedRight.length)
-        else -> normalizedLeft.compareTo(normalizedRight)
+        const val CBZ_EXTENSION = ".cbz"
+        const val MAX_THUMBNAIL_ATTEMPTS = 3
     }
 }
