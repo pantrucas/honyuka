@@ -77,6 +77,7 @@ data class ChapterEntry(
     val translated: Boolean,
 ) {
     val storageKey: String = "$sourceName/$mangaName/$chapterBaseName"
+    val mangaKey: String = "$sourceName/$mangaName"
 }
 
 data class ActiveJob(
@@ -99,6 +100,9 @@ data class HonyukaUiState(
     val activeChapterKey: String? = null,
     val isBusy: Boolean = false,
     val message: String? = null,
+    val groups: List<MangaGroup> = emptyList(),
+    val queueDone: Int = 0,
+    val queueTotal: Int = 0,
 )
 
 @Serializable
@@ -120,3 +124,45 @@ data class TranslationBlock(
     var symWidth: Float,
     val angle: Float,
 )
+
+/**
+ * A user-defined bucket of manga that share a source language.
+ *
+ * Membership is exclusive — a manga belongs to at most one group — so the language a chapter
+ * gets translated from is never ambiguous. [mangaKeys] holds `"<source>/<manga>"` keys, the same
+ * form as [ChapterEntry.mangaKey].
+ */
+@Serializable
+data class MangaGroup(
+    val id: String,
+    val name: String,
+    val sourceLanguageName: String? = null,
+    val mangaKeys: List<String> = emptyList(),
+) {
+    val sourceLanguage: SourceLanguage?
+        get() = sourceLanguageName?.let { saved -> SourceLanguage.entries.firstOrNull { it.name == saved } }
+}
+
+/** The language [mangaKey] should be translated from, falling back to the global setting. */
+fun List<MangaGroup>.sourceLanguageFor(mangaKey: String, fallback: SourceLanguage): SourceLanguage {
+    return firstOrNull { mangaKey in it.mangaKeys }?.sourceLanguage ?: fallback
+}
+
+/** The group [mangaKey] belongs to, if any. */
+fun List<MangaGroup>.groupFor(mangaKey: String): MangaGroup? {
+    return firstOrNull { mangaKey in it.mangaKeys }
+}
+
+/**
+ * Puts [mangaKeys] in [groupId] and removes them from every other group, keeping membership
+ * exclusive.
+ */
+fun List<MangaGroup>.withMembers(groupId: String, mangaKeys: List<String>): List<MangaGroup> {
+    val assigned = mangaKeys.toSet()
+    return map { group ->
+        when (group.id) {
+            groupId -> group.copy(mangaKeys = mangaKeys)
+            else -> group.copy(mangaKeys = group.mangaKeys.filterNot { it in assigned })
+        }
+    }
+}

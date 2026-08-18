@@ -40,15 +40,20 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.ChevronRight
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Translate
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -82,11 +87,18 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.honyuka.model.ChapterEntry
 import app.honyuka.model.GeminiModelPreset
+import app.honyuka.model.MangaGroup
 import app.honyuka.model.SourceLanguage
 import app.honyuka.model.TargetLanguage
 import app.honyuka.model.TranslationEngine
 import app.honyuka.ui.HonyukaTheme
 import app.honyuka.ui.HonyukaViewModel
+import app.honyuka.ui.GroupSection
+import app.honyuka.ui.MangaNode
+import app.honyuka.ui.containsName
+import app.honyuka.ui.duplicatedNames
+import app.honyuka.ui.toGroupSections
+import app.honyuka.ui.toMangaNodes
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.zip.ZipInputStream
@@ -149,44 +161,32 @@ private fun HonyukaApp(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     var settingsOpen by remember { mutableStateOf(false) }
-    val sourceNodes = remember(state.chapters) { state.chapters.toSourceNodes() }
+    val mangaNodes = remember(state.chapters) { state.chapters.toMangaNodes() }
+    val duplicated = remember(mangaNodes) { mangaNodes.duplicatedNames() }
+    val sections = remember(mangaNodes, state.groups) { mangaNodes.toGroupSections(state.groups) }
 
-    // Navigation state
-    var selectedSource by remember { mutableStateOf<SourceNode?>(null) }
-    var selectedManga by remember { mutableStateOf<MangaNode?>(null) }
+    var groupsOpen by remember { mutableStateOf(false) }
+    var pendingBatch by remember { mutableStateOf<BatchRequest?>(null) }
 
-    val titleText = when {
-        selectedManga != null -> selectedManga!!.name
-        selectedSource != null -> selectedSource!!.name
-        else -> "Honyuka"
+    // The key is held rather than the node itself, so the open chapter list keeps up as translation
+    // flips chapters to done underneath it.
+    var selectedMangaKey by remember { mutableStateOf<String?>(null) }
+    val selectedManga = remember(mangaNodes, selectedMangaKey) {
+        mangaNodes.firstOrNull { it.key == selectedMangaKey }
     }
-    val subtitleText = when {
-        selectedManga != null -> "${selectedSource!!.name} / ${selectedManga!!.name}"
-        selectedSource != null -> "downloads / ${selectedSource!!.name}"
-        else -> "Standalone manga translation companion"
-    }
-    val canGoBack = selectedSource != null
 
-    BackHandler(enabled = canGoBack) {
-        if (selectedManga != null) {
-            selectedManga = null
-        } else {
-            selectedSource = null
-        }
-    }
+    val titleText = selectedManga?.name ?: "Honyuka"
+    val subtitleText = selectedManga?.sourceName ?: "Standalone manga translation companion"
+    val canGoBack = selectedMangaKey != null
+
+    BackHandler(enabled = canGoBack) { selectedMangaKey = null }
 
     Scaffold(
         topBar = {
             TopAppBar(
                 navigationIcon = {
                     if (canGoBack) {
-                        IconButton(onClick = {
-                            if (selectedManga != null) {
-                                selectedManga = null
-                            } else {
-                                selectedSource = null
-                            }
-                        }) {
+                        IconButton(onClick = { selectedMangaKey = null }) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                         }
                     }
@@ -209,6 +209,9 @@ private fun HonyukaApp(
                     }
                 },
                 actions = {
+                    IconButton(onClick = { groupsOpen = true }) {
+                        Icon(Icons.Outlined.Folder, contentDescription = "Manga groups")
+                    }
                     IconButton(onClick = { settingsOpen = true }) {
                         Icon(Icons.Outlined.Settings, contentDescription = "Translation settings")
                     }
@@ -230,6 +233,9 @@ private fun HonyukaApp(
                         title = job.title,
                         detail = job.detail,
                         progress = job.progress,
+                        queueDone = state.queueDone,
+                        queueTotal = state.queueTotal,
+                        onCancel = viewModel::cancelQueue,
                     )
                 }
             }
@@ -244,38 +250,80 @@ private fun HonyukaApp(
                 item {
                     EmptyStateCard(hasCompatibleRoot = state.hasCompatibleRoot)
                 }
-            } else when {
-                // Level 3: Chapter list for a specific manga
-                selectedManga != null -> {
-                    items(selectedManga!!.chapters, key = { it.storageKey }) { chapter ->
-                        ChapterDirectoryRow(
-                            chapter = chapter,
-                            enabled = !state.isBusy,
-                            isRunning = state.activeChapterKey == chapter.storageKey,
-                            onTranslate = { viewModel.translateChapter(chapter) },
-                        )
-                    }
+            } else if (selectedManga != null) {
+                item {
+                    MangaActionsRow(
+                        manga = selectedManga,
+                        enabled = !state.isBusy,
+                        onTranslateAll = {
+                            pendingBatch = BatchRequest.Manga(
+                                mangaKey = selectedManga.key,
+                                label = selectedManga.name,
+                                pending = selectedManga.pendingCount,
+                            )
+                        },
+                    )
                 }
-                // Level 2: Manga list for a specific source
-                selectedSource != null -> {
-                    items(selectedSource!!.manga, key = { it.name }) { manga ->
+                items(selectedManga.chapters, key = { it.storageKey }) { chapter ->
+                    ChapterDirectoryRow(
+                        chapter = chapter,
+                        enabled = !state.isBusy,
+                        isRunning = state.activeChapterKey == chapter.storageKey,
+                        onTranslate = { viewModel.translateChapter(chapter) },
+                    )
+                }
+            } else {
+                sections.forEach { section ->
+                    if (section.title != null) {
+                        item(key = "header:" + (section.group?.id ?: section.title)) {
+                            GroupHeader(
+                                section = section,
+                                enabled = !state.isBusy,
+                                onTranslateGroup = { group ->
+                                    pendingBatch = BatchRequest.Group(
+                                        groupId = group.id,
+                                        label = group.name,
+                                        pending = section.pendingCount,
+                                    )
+                                },
+                            )
+                        }
+                    }
+                    items(section.manga, key = { it.key }) { manga ->
                         MangaCard(
                             manga = manga,
-                            onClick = { selectedManga = manga },
-                        )
-                    }
-                }
-                // Level 1: Source list
-                else -> {
-                    items(sourceNodes, key = { it.name }) { source ->
-                        SourceCard(
-                            source = source,
-                            onClick = { selectedSource = source },
+                            showSource = duplicated.containsName(manga.name),
+                            onClick = { selectedMangaKey = manga.key },
                         )
                     }
                 }
             }
         }
+    }
+
+    pendingBatch?.let { request ->
+        BatchConfirmDialog(
+            request = request,
+            onConfirm = {
+                when (request) {
+                    is BatchRequest.Manga -> viewModel.translateManga(request.mangaKey)
+                    is BatchRequest.Group -> viewModel.translateGroup(request.groupId)
+                }
+                pendingBatch = null
+            },
+            onDismiss = { pendingBatch = null },
+        )
+    }
+
+    if (groupsOpen) {
+        GroupsDialog(
+            groups = state.groups,
+            manga = mangaNodes,
+            onCreate = viewModel::createGroup,
+            onUpdate = viewModel::updateGroup,
+            onDelete = viewModel::deleteGroup,
+            onDismiss = { groupsOpen = false },
+        )
     }
 
     if (settingsOpen) {
@@ -504,55 +552,11 @@ private fun SettingsSection(
     }
 }
 
-@Composable
-private fun SourceCard(
-    source: SourceNode,
-    onClick: () -> Unit,
-) {
-    Surface(
-        shape = RoundedCornerShape(12.dp),
-        tonalElevation = 1.dp,
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick),
-    ) {
-        Row(
-            modifier = Modifier.padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            Icon(
-                imageVector = Icons.Outlined.FolderOpen,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(28.dp),
-            )
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = source.name,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Text(
-                    text = "${source.manga.size} manga · ${source.manga.sumOf { it.chapters.size }} chapters",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Icon(
-                imageVector = Icons.Outlined.ChevronRight,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-}
-
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun MangaCard(
     manga: MangaNode,
+    showSource: Boolean,
     onClick: () -> Unit,
 ) {
     Surface(
@@ -578,6 +582,15 @@ private fun MangaCard(
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
+                if (showSource) {
+                    Text(
+                        text = manga.sourceName,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
                 Spacer(Modifier.height(4.dp))
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -776,45 +789,14 @@ private fun formatRootSummary(rootSummary: String?): String {
     }
 }
 
-private fun List<ChapterEntry>.toSourceNodes(): List<SourceNode> {
-    return groupBy { it.sourceName }
-        .toSortedMap(compareBy(String.CASE_INSENSITIVE_ORDER) { it })
-        .map { (sourceName, sourceChapters) ->
-            SourceNode(
-                name = sourceName,
-                manga = sourceChapters
-                    .groupBy { it.mangaName }
-                    .toSortedMap(compareBy(String.CASE_INSENSITIVE_ORDER) { it })
-                    .map { (mangaName, mangaChapters) ->
-                        MangaNode(
-                            sourceName = sourceName,
-                            name = mangaName,
-                            thumbnailChapter = mangaChapters.firstOrNull { it.thumbnailUri != null }
-                                ?: mangaChapters.firstOrNull(),
-                            chapters = mangaChapters.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.chapterDisplayName }),
-                        )
-                    },
-            )
-        }
-}
-
-private data class SourceNode(
-    val name: String,
-    val manga: List<MangaNode>,
-)
-
-private data class MangaNode(
-    val sourceName: String,
-    val name: String,
-    val thumbnailChapter: ChapterEntry?,
-    val chapters: List<ChapterEntry>,
-)
-
 @Composable
 private fun JobCard(
     title: String,
     detail: String,
     progress: Float,
+    queueDone: Int = 0,
+    queueTotal: Int = 0,
+    onCancel: (() -> Unit)? = null,
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
@@ -827,10 +809,20 @@ private fun JobCard(
         ) {
             Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             Text(detail, style = MaterialTheme.typography.bodyMedium)
+            if (queueTotal > 1) {
+                Text(
+                    text = "Chapter ${queueDone + 1} of $queueTotal",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             LinearProgressIndicator(
                 progress = { progress.coerceIn(0f, 1f) },
                 modifier = Modifier.fillMaxWidth(),
             )
+            if (onCancel != null && queueTotal > 0) {
+                TextButton(onClick = onCancel) { Text("Cancel queue") }
+            }
         }
     }
 }
@@ -900,4 +892,312 @@ private fun StatusPill(
             color = if (emphasized) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
+}
+
+private sealed interface BatchRequest {
+    val label: String
+    val pending: Int
+
+    data class Manga(
+        val mangaKey: String,
+        override val label: String,
+        override val pending: Int,
+    ) : BatchRequest
+
+    data class Group(
+        val groupId: String,
+        override val label: String,
+        override val pending: Int,
+    ) : BatchRequest
+}
+
+@Composable
+private fun GroupHeader(
+    section: GroupSection,
+    enabled: Boolean,
+    onTranslateGroup: (MangaGroup) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = section.title.orEmpty(),
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Text(
+                text = "${section.manga.size} manga · ${section.pendingCount} pending",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        section.group?.sourceLanguage?.let { language ->
+            StatusPill(language.label, emphasized = false)
+        }
+        val group = section.group
+        if (group != null && section.pendingCount > 0) {
+            TextButton(onClick = { onTranslateGroup(group) }, enabled = enabled) {
+                Icon(Icons.Outlined.Translate, contentDescription = null)
+                Spacer(Modifier.width(6.dp))
+                Text("Translate")
+            }
+        }
+    }
+}
+
+@Composable
+private fun MangaActionsRow(
+    manga: MangaNode,
+    enabled: Boolean,
+    onTranslateAll: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "${manga.chapters.size} chapters",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Text(
+                text = if (manga.pendingCount == 0) "All translated" else "${manga.pendingCount} pending",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Button(onClick = onTranslateAll, enabled = enabled && manga.pendingCount > 0) {
+            Icon(Icons.Outlined.Translate, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text("Translate pending")
+        }
+    }
+}
+
+@Composable
+private fun BatchConfirmDialog(
+    request: BatchRequest,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Translate ${request.pending} chapters?") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Honyuka will queue every untranslated chapter in ${request.label} and work through them one at a time.")
+                Text(
+                    text = "Chapters that are already translated are skipped. A queue this size can use a lot of API quota on Gemini or DeepL.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = { Button(onClick = onConfirm) { Text("Translate") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun GroupsDialog(
+    groups: List<MangaGroup>,
+    manga: List<MangaNode>,
+    onCreate: (String) -> Unit,
+    onUpdate: (String, String, SourceLanguage?, List<String>) -> Unit,
+    onDelete: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var editingId by remember { mutableStateOf<String?>(null) }
+    var newName by remember { mutableStateOf("") }
+    val editing = groups.firstOrNull { it.id == editingId }
+
+    if (editing != null) {
+        GroupEditorDialog(
+            group = editing,
+            manga = manga,
+            onSave = { name, language, keys ->
+                onUpdate(editing.id, name, language, keys)
+                editingId = null
+            },
+            onDelete = {
+                onDelete(editing.id)
+                editingId = null
+            },
+            onDismiss = { editingId = null },
+        )
+    } else {
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("Manga groups") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 460.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Text(
+                        text = "Group manga that share a source language. Their chapters are then translated from that language instead of the global one.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+
+                    if (groups.isEmpty()) {
+                        Text("No groups yet.", style = MaterialTheme.typography.bodyMedium)
+                    }
+
+                    groups.forEach { group ->
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            tonalElevation = 1.dp,
+                            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { editingId = group.id },
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(group.name, fontWeight = FontWeight.SemiBold)
+                                    Text(
+                                        text = "${group.mangaKeys.size} manga · ${group.sourceLanguage?.label ?: "global language"}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                Icon(Icons.Outlined.ChevronRight, contentDescription = null)
+                            }
+                        }
+                    }
+
+                    OutlinedTextField(
+                        value = newName,
+                        onValueChange = { newName = it },
+                        label = { Text("New group name") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Button(
+                        onClick = {
+                            onCreate(newName)
+                            newName = ""
+                        },
+                        enabled = newName.isNotBlank(),
+                    ) {
+                        Icon(Icons.Outlined.Add, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Create group")
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
+        )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun GroupEditorDialog(
+    group: MangaGroup,
+    manga: List<MangaNode>,
+    onSave: (String, SourceLanguage?, List<String>) -> Unit,
+    onDelete: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var name by remember(group.id) { mutableStateOf(group.name) }
+    var language by remember(group.id) { mutableStateOf(group.sourceLanguage) }
+    var selected by remember(group.id) { mutableStateOf(group.mangaKeys.toSet()) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Edit group") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 500.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+
+                Text("Source language", style = MaterialTheme.typography.labelLarge)
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    FilterChip(
+                        selected = language == null,
+                        onClick = { language = null },
+                        label = { Text("Global") },
+                    )
+                    SourceLanguage.entries.forEach { option ->
+                        FilterChip(
+                            selected = option == language,
+                            onClick = { language = option },
+                            label = { Text(option.label) },
+                        )
+                    }
+                }
+
+                Text("Manga in this group", style = MaterialTheme.typography.labelLarge)
+                // Ticking through the whole library is the only sane way to fill a group; assigning
+                // dozens of manga one card at a time would be unusable.
+                manga.forEach { node ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                selected = if (node.key in selected) selected - node.key else selected + node.key
+                            },
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Checkbox(
+                            checked = node.key in selected,
+                            onCheckedChange = { checked ->
+                                selected = if (checked) selected + node.key else selected - node.key
+                            },
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(node.name, style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                text = node.sourceName,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = { onSave(name, language, selected.toList()) }) { Text("Save") }
+        },
+        dismissButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = onDelete) {
+                    Icon(Icons.Outlined.Delete, contentDescription = null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Delete")
+                }
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+            }
+        },
+    )
 }

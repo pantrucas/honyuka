@@ -3,13 +3,17 @@ package app.honyuka.data
 import android.content.Context
 import android.net.Uri
 import app.honyuka.model.GeminiModelPreset
+import app.honyuka.model.MangaGroup
 import app.honyuka.model.SourceLanguage
 import app.honyuka.model.TargetLanguage
 import app.honyuka.model.TranslationEngine
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 class HonyukaPreferences(context: Context) {
 
     private val prefs = context.getSharedPreferences("honyuka_prefs", Context.MODE_PRIVATE)
+    private val json = Json { ignoreUnknownKeys = true }
 
     fun rootUri(): Uri? = prefs.getString(KEY_ROOT_URI, null)?.let(Uri::parse)
 
@@ -66,6 +70,15 @@ class HonyukaPreferences(context: Context) {
         prefs.edit().putString(KEY_DEEPL_API_KEY, apiKey.trim()).apply()
     }
 
+    fun mangaGroups(): List<MangaGroup> {
+        val stored = prefs.getString(KEY_MANGA_GROUPS, null) ?: return emptyList()
+        return runCatching { json.decodeFromString<List<MangaGroup>>(stored) }.getOrDefault(emptyList())
+    }
+
+    fun saveMangaGroups(groups: List<MangaGroup>) {
+        prefs.edit().putString(KEY_MANGA_GROUPS, json.encodeToString(groups)).apply()
+    }
+
     private companion object {
         const val KEY_ROOT_URI = "root_uri"
         const val KEY_SOURCE_LANGUAGE = "source_language"
@@ -74,5 +87,6 @@ class HonyukaPreferences(context: Context) {
         const val KEY_GEMINI_MODEL_NAME = "gemini_model_name"
         const val KEY_GEMINI_API_KEY = "gemini_api_key"
         const val KEY_DEEPL_API_KEY = "deepl_api_key"
+        const val KEY_MANGA_GROUPS = "manga_groups"
     }
 }
