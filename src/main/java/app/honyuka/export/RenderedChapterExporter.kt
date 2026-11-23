@@ -67,8 +67,8 @@ class RenderedChapterExporter(
         /** Translated text is drawn at most this much larger than the original lettering. */
         const val MAX_SIZE_VS_ORIGINAL = 1.12f
 
-        /** Cap height of animeace as a fraction of the text size (868 / 1024 units). */
-        const val FONT_CAP_HEIGHT_RATIO = 0.85f
+        /** Visible height of a capital in manga_master_bb as a fraction of the text size (H: -55..670 / 1000). */
+        const val FONT_CAP_HEIGHT_RATIO = 0.72f
 
         /** Max pixel gap between two blocks to merge them at render time. */
         const val RENDER_MERGE_GAP_PX = 15f
@@ -80,11 +80,11 @@ class RenderedChapterExporter(
         val IMAGE_EXTENSIONS = setOf("jpg", "jpeg", "png", "webp", "gif", "avif", "heif", "heic", "jxl", "bmp")
     }
 
-    /** animeace has no ¡ ¿ —; comic_book fills those in so no system font sneaks in. */
+    /** Manga Master BB (manga lettering, has ¡ ¿ — and accents); comic_book covers anything else. */
     private val translationTypeface: Typeface = runCatching {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val main = android.graphics.fonts.FontFamily.Builder(
-                android.graphics.fonts.Font.Builder(context.resources, R.font.animeace).build(),
+                android.graphics.fonts.Font.Builder(context.resources, R.font.manga_master_bb).build(),
             ).build()
             val fallback = android.graphics.fonts.FontFamily.Builder(
                 android.graphics.fonts.Font.Builder(context.resources, R.font.comic_book).build(),
@@ -93,7 +93,8 @@ class RenderedChapterExporter(
         } else {
             null
         }
-    }.getOrNull() ?: ResourcesCompat.getFont(context, R.font.animeace) ?: Typeface.DEFAULT_BOLD
+    }.onFailure { android.util.Log.w("HonyukaRender", "Font fallback chain failed", it) }
+        .getOrNull() ?: ResourcesCompat.getFont(context, R.font.manga_master_bb) ?: Typeface.DEFAULT_BOLD
 
     /**
      * Renders the chapter into `local/<manga> (Honyuka)/<chapter>.cbz` — the layout
@@ -497,6 +498,7 @@ class RenderedChapterExporter(
                 val plan = buildBlockPlan(
                     block = block,
                     pageWidth = pageWidth,
+                    pageHeight = pageHeight,
                     cleanupRect = cleanupRect,
                     placementRect = placementRect.shifted(dx, dy),
                     textScale = textScale,
@@ -550,6 +552,7 @@ class RenderedChapterExporter(
     private fun buildBlockPlan(
         block: TranslationBlock,
         pageWidth: Int,
+        pageHeight: Int,
         cleanupRect: RectF,
         placementRect: RectF,
         textScale: Float,
@@ -569,7 +572,12 @@ class RenderedChapterExporter(
             originalSize = originalGlyphHeight(block) / FONT_CAP_HEIGHT_RATIO,
         )
         val textX = contentRect.left
-        val textY = contentRect.top + max((contentRect.height() - textSpec.fillLayout.height) / 2f, 0f)
+        // Centred on the bubble even when the text is taller than it (spills evenly above and
+        // below instead of only downward), and never past the page edges.
+        val layoutHeight = textSpec.fillLayout.height.toFloat()
+        val textY = (contentRect.top + (contentRect.height() - layoutHeight) / 2f)
+            .coerceAtMost(pageHeight - layoutHeight - 2f)
+            .coerceAtLeast(2f)
         val actualTextBounds = buildActualTextBounds(contentRect, textY, textSpec.fillLayout)
         val backgroundPadding = max(4f, textSpec.textSize * 0.18f)
         val backgroundRect = actualTextBounds.expanded(backgroundPadding)
