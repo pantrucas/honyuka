@@ -122,6 +122,74 @@ class HonyukaPreferences(context: Context) {
         prefs.edit().putBoolean(KEY_GOOGLE_FALLBACK, enabled).apply()
     }
 
+    // ── Auto-translate (fork) ──────────────────────────────────────────────
+
+    /** "sourceName/mangaName" keys of mangas the user opted in to auto-translate. Empty by default. */
+    fun autoTranslateMangas(): Set<String> =
+        prefs.getStringSet(KEY_AUTO_MANGAS, emptySet()).orEmpty().toSet()
+
+    fun setAutoTranslateManga(mangaKey: String, enabled: Boolean) {
+        val updated = autoTranslateMangas().let { if (enabled) it + mangaKey else it - mangaKey }
+        prefs.edit().putStringSet(KEY_AUTO_MANGAS, HashSet(updated)).apply()
+    }
+
+    fun autoTranslateEnabled(): Boolean = prefs.getBoolean(KEY_AUTO_ENABLED, false)
+
+    fun saveAutoTranslateEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_AUTO_ENABLED, enabled).apply()
+    }
+
+    /** Human-readable summary of the last automatic run, e.g. "23 Nov 05:10 — Translated 2 chapters". */
+    fun lastAutoRun(): String? = prefs.getString(KEY_AUTO_LAST_RUN, null)
+
+    fun saveLastAutoRun(summary: String) {
+        prefs.edit().putString(KEY_AUTO_LAST_RUN, summary).apply()
+    }
+
+    /** Chapter storage keys that failed in auto mode → time of failure (ms). */
+    fun autoFailures(): Map<String, Long> =
+        prefs.getStringSet(KEY_AUTO_FAILURES, emptySet()).orEmpty().mapNotNull { entry ->
+            val time = entry.substringBefore('|').toLongOrNull() ?: return@mapNotNull null
+            entry.substringAfter('|') to time
+        }.toMap()
+
+    fun saveAutoFailures(failures: Map<String, Long>) {
+        prefs.edit()
+            .putStringSet(KEY_AUTO_FAILURES, HashSet(failures.map { (key, time) -> "$time|$key" }))
+            .apply()
+    }
+
+    // ── Original (upstream) Honyuka update check (fork) ────────────────────
+
+    fun upstreamLastCheckMs(): Long = prefs.getLong(KEY_UPSTREAM_LAST_CHECK, 0L)
+
+    /** Commits in the original Honyuka that this fork doesn't have yet (-1 = never checked). */
+    fun upstreamAheadBy(): Int = prefs.getInt(KEY_UPSTREAM_AHEAD, -1)
+
+    fun upstreamLatestMessage(): String? = prefs.getString(KEY_UPSTREAM_MESSAGE, null)
+
+    fun upstreamLatestTag(): String? = prefs.getString(KEY_UPSTREAM_TAG, null)
+
+    fun saveUpstreamStatus(checkedAtMs: Long, aheadBy: Int, latestMessage: String?, latestTag: String?) {
+        prefs.edit()
+            .putLong(KEY_UPSTREAM_LAST_CHECK, checkedAtMs)
+            .putInt(KEY_UPSTREAM_AHEAD, aheadBy)
+            .putString(KEY_UPSTREAM_MESSAGE, latestMessage)
+            .putString(KEY_UPSTREAM_TAG, latestTag)
+            .apply()
+    }
+
+    fun upstreamNotifiedSha(): String? = prefs.getString(KEY_UPSTREAM_NOTIFIED_SHA, null)
+
+    fun upstreamNotifiedTag(): String? = prefs.getString(KEY_UPSTREAM_NOTIFIED_TAG, null)
+
+    fun saveUpstreamNotified(sha: String?, tag: String?) {
+        prefs.edit()
+            .putString(KEY_UPSTREAM_NOTIFIED_SHA, sha)
+            .putString(KEY_UPSTREAM_NOTIFIED_TAG, tag)
+            .apply()
+    }
+
     fun localModel(): LocalModel = enumPref(KEY_LOCAL_MODEL, LocalModel.DEFAULT)
 
     fun saveLocalModel(model: LocalModel) {
@@ -169,5 +237,15 @@ class HonyukaPreferences(context: Context) {
         const val KEY_DEEPL_API_KEY = "deepl_api_key"
         const val KEY_FILTER_SOURCES_BY_LANGUAGE = "filter_sources_by_language"
         const val KEY_GOOGLE_FALLBACK = "google_fallback"
+        const val KEY_AUTO_MANGAS = "auto_translate_mangas"
+        const val KEY_AUTO_ENABLED = "auto_translate_enabled"
+        const val KEY_AUTO_LAST_RUN = "auto_translate_last_run"
+        const val KEY_AUTO_FAILURES = "auto_translate_failures"
+        const val KEY_UPSTREAM_LAST_CHECK = "upstream_last_check"
+        const val KEY_UPSTREAM_AHEAD = "upstream_ahead_by"
+        const val KEY_UPSTREAM_MESSAGE = "upstream_latest_message"
+        const val KEY_UPSTREAM_TAG = "upstream_latest_tag"
+        const val KEY_UPSTREAM_NOTIFIED_SHA = "upstream_notified_sha"
+        const val KEY_UPSTREAM_NOTIFIED_TAG = "upstream_notified_tag"
     }
 }

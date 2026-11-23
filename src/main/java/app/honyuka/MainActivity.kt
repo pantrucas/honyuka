@@ -254,6 +254,21 @@ private fun HonyukaApp(
                     }
                 } else when {
                     selectedManga != null -> {
+                        item(key = "auto-translate-toggle") {
+                            val manga = selectedManga!!
+                            val autoOn = "${manga.sourceName}/${manga.name}" in state.autoTranslateMangas
+                            SelectableRow(
+                                title = "Auto-translate this manga",
+                                subtitle = when {
+                                    !autoOn -> "Off. Turn on to translate its new chapters automatically."
+                                    state.autoTranslateEnabled ->
+                                        "On. New chapters are translated in the background every 12 hours."
+                                    else -> "On, but the 12-hour schedule is off — enable it in Settings → Automatic."
+                                },
+                                selected = autoOn,
+                                onClick = { viewModel.toggleAutoTranslateManga(manga.sourceName, manga.name) },
+                            )
+                        }
                         items(selectedManga!!.chapters, key = { it.storageKey }) { chapter ->
                             ChapterCard(
                                 chapter = chapter,
@@ -266,7 +281,11 @@ private fun HonyukaApp(
                     }
                     selectedSource != null -> {
                         items(selectedSource!!.manga, key = { it.name }) { manga ->
-                            MangaCard(manga = manga, onClick = { selectedManga = manga })
+                            MangaCard(
+                                manga = manga,
+                                autoTranslate = "${manga.sourceName}/${manga.name}" in state.autoTranslateMangas,
+                                onClick = { selectedManga = manga },
+                            )
                         }
                     }
                     else -> {
@@ -365,6 +384,66 @@ private fun SettingsScreen(
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 120.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
+        item {
+            SettingsSection("Automatic", "じどう") {
+                SelectableRow(
+                    title = "Auto-translate new chapters every 12 hours",
+                    subtitle = "Only mangas where you turned on \"Auto-translate this manga\" " +
+                        "(${state.autoTranslateMangas.size} now). Needs internet and enough battery; " +
+                        "uses the same translator settings as a manual run.",
+                    selected = state.autoTranslateEnabled,
+                    onClick = { viewModel.onAutoTranslateEnabledChanged(!state.autoTranslateEnabled) },
+                )
+                Text(
+                    when {
+                        state.autoRunning -> "Translating in the background now…"
+                        state.lastAutoRun != null -> "Last auto run: ${state.lastAutoRun}"
+                        else -> "Last auto run: never"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = c.textSoft,
+                )
+                PillButton(
+                    text = "Run now",
+                    onClick = viewModel::runAutoTranslateNow,
+                    enabled = !state.autoRunning && state.runStatus == null,
+                    style = PillStyle.SOFT,
+                    compact = true,
+                )
+            }
+        }
+
+        item {
+            SettingsSection("Original Honyuka", "げんさく") {
+                Text(
+                    when {
+                        state.upstreamChecking -> "Revisando…"
+                        state.upstreamAheadBy < 0 -> "Aún no revisado"
+                        state.upstreamAheadBy == 0 -> "Al día"
+                        state.upstreamAheadBy == 1 -> "1 cambio nuevo desde tu versión"
+                        else -> "${state.upstreamAheadBy} cambios nuevos desde tu versión"
+                    },
+                    style = MaterialTheme.typography.titleSmall,
+                    color = if (state.upstreamAheadBy > 0) c.text else c.textSoft,
+                )
+                if (state.upstreamAheadBy > 0) {
+                    state.upstreamLatestMessage?.let { msg ->
+                        Text("Último: $msg", style = MaterialTheme.typography.bodySmall, color = c.textSoft)
+                    }
+                }
+                state.upstreamLatestTag?.let { tag ->
+                    Text("Última versión publicada: $tag", style = MaterialTheme.typography.bodySmall, color = c.textSoft)
+                }
+                PillButton(
+                    text = "Revisar ahora",
+                    onClick = viewModel::checkUpstreamNow,
+                    enabled = !state.upstreamChecking,
+                    style = PillStyle.SOFT,
+                    compact = true,
+                )
+            }
+        }
+
         item {
             SettingsSection("Theme", "テーマ") {
                 Segmented(
@@ -715,6 +794,7 @@ private fun SourceCard(
 @Composable
 private fun MangaCard(
     manga: MangaNode,
+    autoTranslate: Boolean,
     onClick: () -> Unit,
 ) {
     val c = Kawaii.colors
@@ -727,6 +807,7 @@ private fun MangaCard(
                     StatusChip("${manga.chapters.size} chapters", good = false)
                     val translatedCount = manga.chapters.count { it.translated }
                     if (translatedCount > 0) StatusChip("$translatedCount translated", good = true)
+                    if (autoTranslate) StatusChip("Auto ⟳", good = true)
                 }
             }
             Icon(Icons.Outlined.ChevronRight, contentDescription = null, tint = c.textFaint)

@@ -202,6 +202,16 @@ data class HonyukaUiState(
     val apiTestStatus: String? = null,
     val confirmationRequest: ConfirmationRequest? = null,
     val runStatus: RunStatus? = null,
+    /** "sourceName/mangaName" keys opted in to automatic translation (fork). */
+    val autoTranslateMangas: Set<String> = emptySet(),
+    val autoTranslateEnabled: Boolean = false,
+    val lastAutoRun: String? = null,
+    val autoRunning: Boolean = false,
+    /** Commits in the original Honyuka not yet in this fork; -1 = unknown. */
+    val upstreamAheadBy: Int = -1,
+    val upstreamLatestMessage: String? = null,
+    val upstreamLatestTag: String? = null,
+    val upstreamChecking: Boolean = false,
 )
 
 /**

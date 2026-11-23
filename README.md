@@ -12,6 +12,8 @@
 > - **Plan B opcional:** si Gemini falla (cuota llena, clave mala), puede terminar el capítulo con Google Translate y avisar que lo hizo.
 > - **Nombre propio:** se instala como *Honyuka Turbo* (`app.honyuka.turbo`), al lado del Honyuka original.
 > - **Varios idiomas de origen:** puedes marcar más de un idioma en «From»; cada capítulo usa el idioma de su fuente (EN, JA, KO, ZH).
+> - **Traducción automática cada 12 horas:** en cada manga hay un interruptor «Auto-translate this manga» (apagado por defecto). Con «Auto-translate new chapters every 12 hours» activado en Ajustes → Automatic, los capítulos nuevos de esos mangas se traducen solos en segundo plano y te llega una notificación con el resultado.
+> - **Aviso de novedades del original:** una vez al día revisa si el Honyuka original (PrajasW/honyuka) tiene cambios nuevos y te avisa con una notificación; en Ajustes → Original Honyuka puedes revisar a mano.
 > - **Compilación automática:** GitHub Actions compila el APK en cada cambio y lo publica en el release `latest`.
 
 Honyuka (ほにゅか, a playful mispronunciation of *honyakuya*, "translator") is an Android app that translates the manga chapters you've downloaded in [Mihon](https://mihon.app/) and puts the translated chapter back into Mihon's **Local source**, ready to read.

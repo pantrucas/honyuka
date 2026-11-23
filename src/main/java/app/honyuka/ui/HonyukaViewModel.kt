@@ -22,7 +22,10 @@ import app.honyuka.model.HonyukaUiState
 import app.honyuka.model.SourceLanguage
 import app.honyuka.model.TargetLanguage
 import app.honyuka.model.TranslationEngine
+import app.honyuka.service.AutoTranslateScheduler
+import app.honyuka.service.AutoTranslateWorker
 import app.honyuka.service.TranslationService
+import app.honyuka.service.UpstreamChecker
 import app.honyuka.translation.GeminiTestResult
 import app.honyuka.translation.LocalModelManager
 import app.honyuka.translation.fetchGeminiModels
@@ -64,6 +67,12 @@ class HonyukaViewModel(
             deepLApiKey = preferences.deepLApiKey(),
             filterSourcesByLanguage = preferences.filterSourcesByLanguage(),
             googleFallback = preferences.googleFallback(),
+            autoTranslateMangas = preferences.autoTranslateMangas(),
+            autoTranslateEnabled = preferences.autoTranslateEnabled(),
+            lastAutoRun = preferences.lastAutoRun(),
+            upstreamAheadBy = preferences.upstreamAheadBy(),
+            upstreamLatestMessage = preferences.upstreamLatestMessage(),
+            upstreamLatestTag = preferences.upstreamLatestTag(),
         ),
     )
     val state: StateFlow<HonyukaUiState> = _state.asStateFlow()
@@ -163,6 +172,23 @@ class HonyukaViewModel(
                         activeChapterKey = status?.chapterKey ?: it.activeChapterKey,
                     )
                 }
+            }
+        }
+        // Fork: background auto-translate + check for changes in the original Honyuka.
+        AutoTranslateScheduler.apply(appContext, preferences.autoTranslateEnabled())
+        UpstreamChecker.schedule(appContext)
+        if (UpstreamChecker.isDue(preferences)) checkUpstreamNow()
+        viewModelScope.launch {
+            var wasRunning = false
+            AutoTranslateWorker.running.collect { running ->
+                _state.update { it.copy(autoRunning = running, lastAutoRun = preferences.lastAutoRun()) }
+                if (wasRunning && !running) refresh() // newly translated chapters
+                wasRunning = running
+            }
+        }
+        viewModelScope.launch {
+            AutoTranslateWorker.lastRun.collect { summary ->
+                if (summary != null) _state.update { it.copy(lastAutoRun = summary) }
             }
         }
         // Poll model downloads while any is running (DownloadManager has no push updates).
@@ -270,6 +296,52 @@ class HonyukaViewModel(
     fun onGoogleFallbackChanged(enabled: Boolean) {
         preferences.saveGoogleFallback(enabled)
         _state.update { it.copy(googleFallback = enabled) }
+    }
+
+    // ── Auto-translate (fork) ──────────────────────────────────────────────
+
+    /** Opt a single manga in or out of automatic translation (off by default for all). */
+    fun toggleAutoTranslateManga(sourceName: String, mangaName: String) {
+        val key = "$sourceName/$mangaName"
+        val enable = key !in preferences.autoTranslateMangas()
+        preferences.setAutoTranslateManga(key, enable)
+        _state.update { it.copy(autoTranslateMangas = preferences.autoTranslateMangas()) }
+    }
+
+    fun onAutoTranslateEnabledChanged(enabled: Boolean) {
+        preferences.saveAutoTranslateEnabled(enabled)
+        AutoTranslateScheduler.apply(appContext, enabled)
+        _state.update { it.copy(autoTranslateEnabled = enabled) }
+    }
+
+    fun runAutoTranslateNow() {
+        if (state.value.autoTranslateMangas.isEmpty()) {
+            val message = "Turn on \"Auto-translate this manga\" in at least one manga first."
+            Toast.makeText(appContext, message, Toast.LENGTH_LONG).show()
+            return
+        }
+        AutoTranslateScheduler.runNow(appContext)
+        Toast.makeText(appContext, "Auto-translate will start in the background (needs internet).", Toast.LENGTH_LONG).show()
+    }
+
+    fun checkUpstreamNow() {
+        if (_state.value.upstreamChecking) return
+        _state.update { it.copy(upstreamChecking = true) }
+        viewModelScope.launch {
+            val status = UpstreamChecker.check(appContext)
+            _state.update {
+                if (status == null) {
+                    it.copy(upstreamChecking = false)
+                } else {
+                    it.copy(
+                        upstreamChecking = false,
+                        upstreamAheadBy = status.aheadBy,
+                        upstreamLatestMessage = status.latestMessage,
+                        upstreamLatestTag = status.latestTag,
+                    )
+                }
+            }
+        }
     }
 
     /** Scans downloads, skipping sources in other languages when the filter is on. */
@@ -397,6 +469,12 @@ class HonyukaViewModel(
 
     fun translateChapter(chapter: ChapterEntry) {
         val currentState = state.value
+        if (AutoTranslateWorker.running.value) {
+            val message = "Auto-translate is running in the background. Try again when it finishes."
+            Toast.makeText(appContext, message, Toast.LENGTH_LONG).show()
+            _state.update { it.copy(message = message) }
+            return
+        }
         val translationEngine = currentState.translationEngine
         val selectedApiKey = when (translationEngine) {
             TranslationEngine.GEMINI -> currentState.geminiApiKey

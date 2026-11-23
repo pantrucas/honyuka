@@ -14,8 +14,8 @@ android {
         applicationId = "app.honyuka.turbo"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.2.1-turbo"
+        versionCode = 5
+        versionName = "0.3.0-turbo"
 
         // LiteRT-LM ships arm64 native code only; keeps the APK small.
         ndk {
@@ -96,6 +96,8 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.documentfile:documentfile:1.0.1")
+    // Background auto-translate + upstream update check (fork)
+    implementation("androidx.work:work-runtime-ktx:2.10.0")
 
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")

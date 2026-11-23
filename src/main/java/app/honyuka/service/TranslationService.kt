@@ -9,24 +9,17 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
-import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import androidx.documentfile.provider.DocumentFile
 import app.honyuka.MainActivity
 import app.honyuka.R
-import app.honyuka.data.HonyukaPreferences
-import app.honyuka.data.HonyukaStorage
-import app.honyuka.export.RenderedChapterExporter
 import app.honyuka.model.ChapterEntry
 import app.honyuka.model.RunStatus
 import app.honyuka.model.LocalBackend
 import app.honyuka.model.LocalModel
-import app.honyuka.model.PageTranslation
 import app.honyuka.model.SourceLanguage
 import app.honyuka.model.TargetLanguage
 import app.honyuka.model.TranslationEngine
-import app.honyuka.translation.TranslationPipeline
 import app.honyuka.translation.TranslationStop
 import app.honyuka.translation.TranslationStoppedException
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -37,7 +30,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 class TranslationService : Service() {
 
@@ -122,146 +114,56 @@ class TranslationService : Service() {
         rerenderOnly: Boolean,
         isConfirmed: Boolean,
     ) {
-        val preferences = HonyukaPreferences(this)
-        val storage = HonyukaStorage(this, preferences)
-        val pipeline = TranslationPipeline(this)
-        val exporter = RenderedChapterExporter(this, storage)
-
+        val settings = TranslationSettings(
+            sourceLanguage = sourceLanguage,
+            targetLanguage = targetLanguage,
+            engine = translationEngine,
+            geminiApiKey = geminiApiKey,
+            geminiModelName = geminiModelName,
+            deepLApiKey = deepLApiKey,
+            localModel = localModel,
+            localBackend = localBackend,
+            googleFallback = googleFallback,
+        )
         try {
-            val chapterDocument = withContext(Dispatchers.IO) {
-                storage.resolveOriginalChapterDocument(chapter)
-            } ?: run {
-                updateNotification("Error", "Could not open chapter", 0)
-                broadcastResult(chapter, success = false, error = "Unable to open chapter")
-                stopSelf()
-                return
-            }
-
-            val saved = storage.readTranslation(chapter)
-            var translations = saved
-            val warnings = mutableListOf<String>()
-
-            val hasValidSidecar = !saved.isNullOrEmpty() && saved.values.any { it.blocks.isNotEmpty() }
-
-            if (rerenderOnly) {
-                updateNotification("Loading translations", chapter.chapterDisplayName, 10)
-                broadcastProgress(chapter, "Loading translations", "Reading saved translation data", 0.1f)
-                if (!hasValidSidecar) {
-                    updateNotification("Error", "No saved translation found", 0)
-                    broadcastResult(chapter, success = false, error = "No saved translation found for this chapter. Translate it first.")
-                    stopSelf()
-                    return
-                }
-            } else {
-                if (!hasValidSidecar) {
-                    translations = pipeline.extractText(
-                        chapter = chapter,
-                        chapterDocument = chapterDocument,
-                        sourceLanguage = sourceLanguage,
-                    ) { title, detail, progress ->
-                        updateNotification(title, detail, (progress * 100).toInt())
-                        broadcastProgress(chapter, title, detail, progress)
-                    }
-                    // Save the sidecar immediately to cache the OCR results
-                    storage.writeTranslation(chapter, translations)
-                }
-
-                val needsTranslation = translations!!.values.any { page -> 
-                    page.blocks.any { it.needsTranslation() } 
-                }
-
-                if (needsTranslation) {
-                    if (translationEngine == TranslationEngine.GEMINI && !isConfirmed) {
-                        // Only lines that will really be sent are counted (skips translated,
-                        // duplicate, watermark and remembered lines).
-                        val (chunks, blocks) = pipeline.estimateGeminiChunks(
-                            pages = translations,
-                            sourceLanguage = sourceLanguage,
-                            targetLanguage = targetLanguage,
-                            geminiModelName = geminiModelName,
-                        )
-                        if (chunks > 0) {
-                            sendBroadcast(Intent(ACTION_REQUIRE_CONFIRMATION).apply {
-                                setPackage(packageName)
-                                putExtra(EXTRA_STORAGE_KEY, chapter.storageKey)
-                                putExtra(EXTRA_CHUNK_COUNT, chunks)
-                                putExtra(EXTRA_BLOCK_COUNT, blocks)
-                            })
-                            return
-                        }
-                    }
-
-                    val mutableTranslations = translations as MutableMap<String, PageTranslation>
-                    // On-device inference can take many minutes; keep the CPU awake meanwhile.
-                    val wakeLock = if (translationEngine == TranslationEngine.ON_DEVICE) {
-                        (getSystemService(Context.POWER_SERVICE) as PowerManager)
-                            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Honyuka:OnDeviceTranslation")
-                            .apply { acquire(WAKE_LOCK_TIMEOUT_MS) }
-                    } else {
-                        null
-                    }
-                    try {
-                    pipeline.translateText(
-                        pageTranslations = mutableTranslations,
-                        sourceLanguage = sourceLanguage,
-                        targetLanguage = targetLanguage,
-                        translationEngine = translationEngine,
-                        geminiApiKey = geminiApiKey,
-                        geminiModelName = geminiModelName,
-                        deepLApiKey = deepLApiKey,
-                        localModel = localModel,
-                        localBackend = localBackend,
-                        googleFallback = googleFallback,
-                        // Save after every request so a later failure never loses paid-for work.
-                        onChunkSaved = { done, total ->
-                            if (done > 0) storage.writeTranslation(chapter, mutableTranslations)
-                            runStatus.update { status ->
-                                status?.copy(
-                                    chunksDone = done,
-                                    chunksTotal = total,
-                                    chunksStartedAtMs = status.chunksStartedAtMs.takeIf { it > 0 }
-                                        ?: System.currentTimeMillis(),
-                                )
-                            }
-                        },
-                    ) { title, detail, progress ->
-                        updateNotification(title, detail, (progress * 100).toInt())
-                        broadcastProgress(chapter, title, detail, progress)
-                    }?.let { fallbackNotice -> warnings += fallbackNotice }
-                    } finally {
-                        wakeLock?.takeIf { it.isHeld }?.release()
-                    }
-                    updateNotification("Saving translation", chapter.chapterDisplayName, 95)
-                    storage.writeTranslation(chapter, translations)
-
-                    // Never call a run "complete" while bubbles are still in the original language.
-                    val leftOriginal = translations.values.sumOf { page ->
-                        page.blocks.count { it.needsTranslation() }
-                    }
-                    if (leftOriginal > 0) {
-                        warnings += "$leftOriginal of ${translations.values.sumOf { it.blocks.size }} bubbles are " +
-                            "still in the original language (names and sound effects are often left as-is). " +
-                            "Tap Translate again to retry only those."
-                    }
-                }
-            }
-
-            updateNotification("Exporting to Local Source", chapter.chapterDisplayName, 97)
-            broadcastProgress(chapter, "Rendering chapter", "Writing pages to the Local Source", 0.97f)
-            exporter.exportToLocalSource(
+            val outcome = ChapterTranslator(this).run(
                 chapter = chapter,
-                translations = translations!!,
-                translatorLabel = if (rerenderOnly) null else translationEngine.label,
-                targetLanguage = if (rerenderOnly) null else targetLanguage,
-            )
-
-            val warning = warnings.joinToString("\n").ifBlank { null }
-            if (warning == null) {
-                updateNotification("Completed ✓", chapter.chapterDisplayName, 100)
-            } else {
-                updateNotification("Completed with warnings", "${chapter.chapterDisplayName}: $warning", 100)
+                settings = settings,
+                rerenderOnly = rerenderOnly,
+                requireConfirmation = !isConfirmed,
+                onChunkSaved = { done, total ->
+                    runStatus.update { status ->
+                        status?.copy(
+                            chunksDone = done,
+                            chunksTotal = total,
+                            chunksStartedAtMs = status.chunksStartedAtMs.takeIf { it > 0 }
+                                ?: System.currentTimeMillis(),
+                        )
+                    }
+                },
+            ) { title, detail, progress ->
+                updateNotification(title, detail, (progress * 100).toInt())
+                broadcastProgress(chapter, title, detail, progress)
             }
-            broadcastResult(chapter, success = true, warning = warning)
+            when (outcome) {
+                is ChapterRunOutcome.NeedsConfirmation -> {
+                    sendBroadcast(Intent(ACTION_REQUIRE_CONFIRMATION).apply {
+                        setPackage(packageName)
+                        putExtra(EXTRA_STORAGE_KEY, chapter.storageKey)
+                        putExtra(EXTRA_CHUNK_COUNT, outcome.chunks)
+                        putExtra(EXTRA_BLOCK_COUNT, outcome.blocks)
+                    })
+                }
+                is ChapterRunOutcome.Completed -> {
+                    val warning = outcome.warning
+                    if (warning == null) {
+                        updateNotification("Completed ✓", chapter.chapterDisplayName, 100)
+                    } else {
+                        updateNotification("Completed with warnings", "${chapter.chapterDisplayName}: $warning", 100)
+                    }
+                    broadcastResult(chapter, success = true, warning = warning)
+                }
+            }
         } catch (e: TranslationStoppedException) {
             updateNotification("Stopped", e.message.orEmpty(), 0)
             broadcastResult(chapter, success = false, error = e.message)
@@ -416,7 +318,6 @@ class TranslationService : Service() {
         private const val EXTRA_LOCAL_MODEL = "local_model"
         private const val EXTRA_LOCAL_BACKEND = "local_backend"
         private const val EXTRA_GOOGLE_FALLBACK = "google_fallback"
-        private const val WAKE_LOCK_TIMEOUT_MS = 2 * 60 * 60 * 1000L
         private const val EXTRA_RERENDER_ONLY = "rerender_only"
         private const val EXTRA_CONFIRMED = "confirmed"
 
