@@ -2,7 +2,7 @@ name: Build APK
 
 on:
   push:
-    branches: [main, mejoras]
+    branches: [master, main, mejoras]
   workflow_dispatch:
 
 permissions:
