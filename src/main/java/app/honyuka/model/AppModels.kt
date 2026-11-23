@@ -172,6 +172,8 @@ data class HonyukaUiState(
     val themeMode: ThemeMode = ThemeMode.AUTO,
     val geminiApiKey: String = "",
     val deepLApiKey: String = "",
+    val filterSourcesByLanguage: Boolean = true,
+    val googleFallback: Boolean = false,
     val chapters: List<ChapterEntry> = emptyList(),
     val activeJob: ActiveJob? = null,
     val activeChapterKey: String? = null,

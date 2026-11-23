@@ -404,6 +404,13 @@ private fun SettingsScreen(
                         KawaiiChip(option.label, selected = option == state.sourceLanguage, onClick = { viewModel.onSourceLanguageSelected(option) })
                     }
                 }
+                SelectableRow(
+                    title = "Only show ${state.sourceLanguage.label} sources",
+                    subtitle = "Skips Mihon sources tagged with another language, e.g. (ES). " +
+                        "Sources without a tag are always shown. Makes scanning much faster.",
+                    selected = state.filterSourcesByLanguage,
+                    onClick = { viewModel.onFilterSourcesByLanguageChanged(!state.filterSourcesByLanguage) },
+                )
                 Text("To", style = MaterialTheme.typography.labelLarge, color = c.textSoft)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     TargetLanguage.entries.forEach { option ->
@@ -507,6 +514,13 @@ private fun GeminiSettings(state: HonyukaUiState, viewModel: HonyukaViewModel) {
         state.apiTestStatus?.takeIf { it != "Testing…" }?.let { status ->
             Text(status, style = MaterialTheme.typography.bodySmall, color = if (status.startsWith("✅")) c.matcha else c.danger)
         }
+        SelectableRow(
+            title = "If Gemini fails, use Google Translate",
+            subtitle = "When the quota runs out or the key fails, finish the chapter with Google Translate " +
+                "(simpler wording). You'll be told when this happens.",
+            selected = state.googleFallback,
+            onClick = { viewModel.onGoogleFallbackChanged(!state.googleFallback) },
+        )
     }
 }
 

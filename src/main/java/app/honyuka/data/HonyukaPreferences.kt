@@ -88,6 +88,20 @@ class HonyukaPreferences(context: Context) {
         prefs.edit().putString(KEY_DEEPL_API_KEY, apiKey.trim()).apply()
     }
 
+    /** Hide source folders tagged with another language, e.g. `(ES)` when translating from English. */
+    fun filterSourcesByLanguage(): Boolean = prefs.getBoolean(KEY_FILTER_SOURCES_BY_LANGUAGE, true)
+
+    fun saveFilterSourcesByLanguage(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_FILTER_SOURCES_BY_LANGUAGE, enabled).apply()
+    }
+
+    /** When Gemini fails (quota, key…), finish the remaining lines with Google Translate. */
+    fun googleFallback(): Boolean = prefs.getBoolean(KEY_GOOGLE_FALLBACK, false)
+
+    fun saveGoogleFallback(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_GOOGLE_FALLBACK, enabled).apply()
+    }
+
     fun localModel(): LocalModel = enumPref(KEY_LOCAL_MODEL, LocalModel.DEFAULT)
 
     fun saveLocalModel(model: LocalModel) {
@@ -132,5 +146,7 @@ class HonyukaPreferences(context: Context) {
         const val KEY_THEME_MODE = "theme_mode"
         const val KEY_DOWNLOAD_ID_PREFIX = "local_model_download_"
         const val KEY_DEEPL_API_KEY = "deepl_api_key"
+        const val KEY_FILTER_SOURCES_BY_LANGUAGE = "filter_sources_by_language"
+        const val KEY_GOOGLE_FALLBACK = "google_fallback"
     }
 }

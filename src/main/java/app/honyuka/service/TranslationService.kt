@@ -78,6 +78,7 @@ class TranslationService : Service() {
         val localBackend = intent.getStringExtra(EXTRA_LOCAL_BACKEND)
             ?.let { name -> LocalBackend.entries.firstOrNull { it.name == name } }
             ?: LocalBackend.AUTO
+        val googleFallback = intent.getBooleanExtra(EXTRA_GOOGLE_FALLBACK, false)
         val rerenderOnly = intent.getBooleanExtra(EXTRA_RERENDER_ONLY, false)
         val isConfirmed = intent.getBooleanExtra(EXTRA_CONFIRMED, false)
 
@@ -100,7 +101,7 @@ class TranslationService : Service() {
         translationJob = scope.launch {
             runTranslation(
                 chapter, sourceLang, targetLang, engine, geminiApiKey, geminiModelName, deepLApiKey,
-                localModel, localBackend, rerenderOnly, isConfirmed,
+                localModel, localBackend, googleFallback, rerenderOnly, isConfirmed,
             )
         }
 
@@ -117,6 +118,7 @@ class TranslationService : Service() {
         deepLApiKey: String,
         localModel: LocalModel,
         localBackend: LocalBackend,
+        googleFallback: Boolean,
         rerenderOnly: Boolean,
         isConfirmed: Boolean,
     ) {
@@ -137,6 +139,7 @@ class TranslationService : Service() {
 
             val saved = storage.readTranslation(chapter)
             var translations = saved
+            val warnings = mutableListOf<String>()
 
             val hasValidSidecar = !saved.isNullOrEmpty() && saved.values.any { it.blocks.isNotEmpty() }
 
@@ -208,6 +211,7 @@ class TranslationService : Service() {
                         deepLApiKey = deepLApiKey,
                         localModel = localModel,
                         localBackend = localBackend,
+                        googleFallback = googleFallback,
                         // Save after every request so a later failure never loses paid-for work.
                         onChunkSaved = { done, total ->
                             if (done > 0) storage.writeTranslation(chapter, mutableTranslations)
@@ -223,12 +227,22 @@ class TranslationService : Service() {
                     ) { title, detail, progress ->
                         updateNotification(title, detail, (progress * 100).toInt())
                         broadcastProgress(chapter, title, detail, progress)
-                    }
+                    }?.let { fallbackNotice -> warnings += fallbackNotice }
                     } finally {
                         wakeLock?.takeIf { it.isHeld }?.release()
                     }
                     updateNotification("Saving translation", chapter.chapterDisplayName, 95)
                     storage.writeTranslation(chapter, translations)
+
+                    // Never call a run "complete" while bubbles are still in the original language.
+                    val leftOriginal = translations.values.sumOf { page ->
+                        page.blocks.count { it.needsTranslation() }
+                    }
+                    if (leftOriginal > 0) {
+                        warnings += "$leftOriginal of ${translations.values.sumOf { it.blocks.size }} bubbles are " +
+                            "still in the original language (names and sound effects are often left as-is). " +
+                            "Tap Translate again to retry only those."
+                    }
                 }
             }
 
@@ -241,8 +255,13 @@ class TranslationService : Service() {
                 targetLanguage = if (rerenderOnly) null else targetLanguage,
             )
 
-            updateNotification("Completed ✓", chapter.chapterDisplayName, 100)
-            broadcastResult(chapter, success = true)
+            val warning = warnings.joinToString("\n").ifBlank { null }
+            if (warning == null) {
+                updateNotification("Completed ✓", chapter.chapterDisplayName, 100)
+            } else {
+                updateNotification("Completed with warnings", "${chapter.chapterDisplayName}: $warning", 100)
+            }
+            broadcastResult(chapter, success = true, warning = warning)
         } catch (e: TranslationStoppedException) {
             updateNotification("Stopped", e.message.orEmpty(), 0)
             broadcastResult(chapter, success = false, error = e.message)
@@ -313,12 +332,18 @@ class TranslationService : Service() {
         })
     }
 
-    private fun broadcastResult(chapter: ChapterEntry, success: Boolean, error: String? = null) {
+    private fun broadcastResult(
+        chapter: ChapterEntry,
+        success: Boolean,
+        error: String? = null,
+        warning: String? = null,
+    ) {
         sendBroadcast(Intent(ACTION_RESULT).apply {
             setPackage(packageName)
             putExtra(EXTRA_STORAGE_KEY, chapter.storageKey)
             putExtra(EXTRA_RESULT_SUCCESS, success)
             if (error != null) putExtra(EXTRA_RESULT_ERROR, error)
+            if (warning != null) putExtra(EXTRA_RESULT_WARNING, warning)
         })
     }
 
@@ -370,6 +395,7 @@ class TranslationService : Service() {
         const val EXTRA_PROGRESS_VALUE = "progress_value"
         const val EXTRA_RESULT_SUCCESS = "result_success"
         const val EXTRA_RESULT_ERROR = "result_error"
+        const val EXTRA_RESULT_WARNING = "result_warning"
         const val EXTRA_CHUNK_COUNT = "chunk_count"
         const val EXTRA_BLOCK_COUNT = "block_count"
 
@@ -389,6 +415,7 @@ class TranslationService : Service() {
         private const val EXTRA_DEEPL_API_KEY = "deepl_api_key"
         private const val EXTRA_LOCAL_MODEL = "local_model"
         private const val EXTRA_LOCAL_BACKEND = "local_backend"
+        private const val EXTRA_GOOGLE_FALLBACK = "google_fallback"
         private const val WAKE_LOCK_TIMEOUT_MS = 2 * 60 * 60 * 1000L
         private const val EXTRA_RERENDER_ONLY = "rerender_only"
         private const val EXTRA_CONFIRMED = "confirmed"
@@ -404,6 +431,7 @@ class TranslationService : Service() {
             deepLApiKey: String,
             localModel: LocalModel = LocalModel.DEFAULT,
             localBackend: LocalBackend = LocalBackend.AUTO,
+            googleFallback: Boolean = false,
             confirmed: Boolean = false,
         ): Intent {
             return Intent(context, TranslationService::class.java).apply {
@@ -423,6 +451,7 @@ class TranslationService : Service() {
                 putExtra(EXTRA_DEEPL_API_KEY, deepLApiKey)
                 putExtra(EXTRA_LOCAL_MODEL, localModel.name)
                 putExtra(EXTRA_LOCAL_BACKEND, localBackend.name)
+                putExtra(EXTRA_GOOGLE_FALLBACK, googleFallback)
                 putExtra(EXTRA_CONFIRMED, confirmed)
             }
         }

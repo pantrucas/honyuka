@@ -39,3 +39,5 @@ backend-reference/
 
 # Secrets
 .env
+*.p12
+*.pfx

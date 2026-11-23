@@ -10,11 +10,12 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "app.honyuka"
+        // Fork: own id so it installs next to the original Honyuka.
+        applicationId = "app.honyuka.cl"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "0.2.0-cl"
 
         // LiteRT-LM ships arm64 native code only; keeps the APK small.
         ndk {
@@ -22,9 +23,30 @@ android {
         }
     }
 
+    // Release signing comes from env vars (set by CI from repository secrets).
+    // Without them the release APK is signed with the debug key.
+    val releaseKeystore = System.getenv("HONYUKA_KEYSTORE_FILE")?.takeIf { it.isNotBlank() }
+    signingConfigs {
+        if (releaseKeystore != null) {
+            create("release") {
+                storeFile = file(releaseKeystore)
+                storePassword = System.getenv("HONYUKA_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("HONYUKA_KEY_ALIAS")
+                keyPassword = System.getenv("HONYUKA_KEY_PASSWORD")
+                if (releaseKeystore.endsWith(".p12") || releaseKeystore.endsWith(".pfx")) {
+                    storeType = "pkcs12"
+                }
+            }
+        }
+    }
+
     buildTypes {
         release {
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (releaseKeystore != null) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

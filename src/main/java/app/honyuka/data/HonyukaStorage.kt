@@ -2,9 +2,12 @@ package app.honyuka.data
 
 import android.content.Context
 import android.net.Uri
+import android.provider.DocumentsContract
+import android.util.Log
 import androidx.documentfile.provider.DocumentFile
 import app.honyuka.model.ChapterEntry
 import app.honyuka.model.PageTranslation
+import app.honyuka.model.SourceLanguage
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.encodeToString
 import java.io.OutputStream
@@ -22,54 +25,86 @@ class HonyukaStorage(
     fun rootSummary(): String? = preferences.rootUri()?.toString()
 
     fun hasCompatibleRoot(): Boolean {
-        val root = rootDirectory() ?: return false
-        return root.findFile(DOWNLOADS_DIR)?.isDirectory == true
+        val treeUri = preferences.rootUri() ?: return false
+        return runCatching {
+            listChildren(treeUri, DocumentsContract.getTreeDocumentId(treeUri))
+                .any { it.name == DOWNLOADS_DIR && it.isDirectory }
+        }.getOrElse { rootDirectory()?.findFile(DOWNLOADS_DIR)?.isDirectory == true }
     }
 
-    fun scanChapters(): List<ChapterEntry> {
-        val root = rootDirectory() ?: return emptyList()
-        val downloadsDir = root.findFile(DOWNLOADS_DIR) ?: return emptyList()
-        // List the local source once instead of a findFile() per chapter (slow over SAF).
-        val exportedByManga = root.findFile(LOCAL_SOURCE_DIR)
-            ?.listFiles()
-            ?.filter { it.isDirectory && it.name != null }
-            ?.associate { dir -> dir.name!! to dir.listFiles().mapNotNull { it.name }.toSet() }
-            .orEmpty()
+    /**
+     * Lists every downloaded chapter.
+     *
+     * Uses one DocumentsContract query per folder (id + name + type in a single cursor)
+     * instead of DocumentFile, whose listFiles()/getName()/isDirectory() cost one
+     * provider round-trip per child per call — that made a 167-chapter folder take
+     * tens of minutes.
+     *
+     * @param onlyLanguage when set, source folders tagged with another language
+     * (Mihon names them `Source (EN)`, `Source (ES)`…) are skipped entirely.
+     * Folders without a language tag are always included.
+     */
+    fun scanChapters(onlyLanguage: SourceLanguage? = null): List<ChapterEntry> {
+        val treeUri = preferences.rootUri() ?: return emptyList()
+        val rootChildren = listChildren(treeUri, DocumentsContract.getTreeDocumentId(treeUri))
+        val downloadsDir = rootChildren.firstOrNull { it.name == DOWNLOADS_DIR && it.isDirectory }
+            ?: return emptyList()
 
-        return downloadsDir.listFiles()
-            .filter { it.isDirectory && !it.name.isNullOrBlank() }
+        // local/<manga> (Honyuka)/ folders, listed lazily only for mangas we actually show.
+        val localDirs = rootChildren.firstOrNull { it.name == LOCAL_SOURCE_DIR && it.isDirectory }
+            ?.let { local -> listChildren(treeUri, local.documentId).filter { it.isDirectory } }
+            .orEmpty()
+            .associateBy { it.name }
+
+        val wantedLanguage = onlyLanguage?.folderTag()
+        val startedAt = System.currentTimeMillis()
+
+        val chapters = listChildren(treeUri, downloadsDir.documentId)
+            .filter { it.isDirectory && it.name.isNotBlank() && !it.name.startsWith(".") }
+            .filter { sourceDir ->
+                val tag = sourceLanguageTag(sourceDir.name)
+                wantedLanguage == null || tag == null || tag == wantedLanguage
+            }
             .sortedByNaturalName()
             .flatMap { sourceDir ->
-                sourceDir.listFiles()
-                    .filter { it.isDirectory && !it.name.isNullOrBlank() }
+                listChildren(treeUri, sourceDir.documentId)
+                    .filter { it.isDirectory && it.name.isNotBlank() && !it.name.startsWith(".") }
                     .sortedByNaturalName()
                     .flatMap { mangaDir ->
-                        val exported = exportedByManga[localMangaDirName(mangaDir.name!!)].orEmpty()
-                        mangaDir.listFiles()
+                        val exported = localDirs[localMangaDirName(mangaDir.name)]
+                            ?.let { dir -> listChildren(treeUri, dir.documentId).map { it.name }.toSet() }
+                            .orEmpty()
+                        listChildren(treeUri, mangaDir.documentId)
                             .filter { isVisibleChapterContainer(it) }
                             .sortedByNaturalName()
                             .map { chapterFile ->
-                                val baseName = chapterFile.name!!.removeSuffix(".cbz")
+                                val baseName = chapterFile.name.removeSuffix(".cbz")
                                 ChapterEntry(
-                                    sourceName = sourceDir.name!!,
-                                    mangaName = mangaDir.name!!,
+                                    sourceName = sourceDir.name,
+                                    mangaName = mangaDir.name,
                                     chapterDisplayName = baseName,
                                     chapterBaseName = baseName,
                                     chapterUri = chapterFile.uri,
-                                    thumbnailUri = chapterThumbnailUri(chapterFile),
-                                    isCbz = chapterFile.isFile,
+                                    thumbnailUri = if (chapterFile.isDirectory) {
+                                        firstImageUri(treeUri, chapterFile.documentId, depth = 0)
+                                    } else {
+                                        null
+                                    },
+                                    isCbz = !chapterFile.isDirectory,
                                     translated = localChapterFileNames(baseName).any { it in exported },
                                 )
                             }
                     }
             }
+        Log.d(TAG, "Scanned ${chapters.size} chapters in ${System.currentTimeMillis() - startedAt} ms")
+        return chapters
     }
 
     fun resolveChapterDocument(chapter: ChapterEntry): DocumentFile? {
         val root = rootDirectory() ?: return null
-        val mangaDir = root.findFile(DOWNLOADS_DIR)
-            ?.findFile(chapter.sourceName)
-            ?.findFile(chapter.mangaName)
+        val mangaDir = root.fastFindFile(DOWNLOADS_DIR)
+            ?.fastFindFile(chapter.sourceName)
+            ?.fastFindFile(chapter.mangaName)
             ?: return null
 
         val candidateNames = buildList {
@@ -81,7 +116,7 @@ class HonyukaStorage(
 
         return candidateNames
             .asSequence()
-            .mapNotNull(mangaDir::findFile)
+            .mapNotNull { mangaDir.fastFindFile(it) }
             .firstOrNull()
     }
 
@@ -92,11 +127,11 @@ class HonyukaStorage(
     /** `local/<manga> (Honyuka)/`, created if needed. Mihon's Local Source lists each folder here as a manga. */
     fun localSourceMangaDirectory(chapter: ChapterEntry): DocumentFile {
         val root = requireNotNull(rootDirectory()) { "Storage root is not configured." }
-        val localRoot = root.findFile(LOCAL_SOURCE_DIR) ?: root.createDirectory(LOCAL_SOURCE_DIR)
+        val localRoot = root.fastFindFile(LOCAL_SOURCE_DIR) ?: root.createDirectory(LOCAL_SOURCE_DIR)
         requireNotNull(localRoot) { "Unable to locate or create the local source root." }
 
         val mangaDirName = localMangaDirName(chapter.mangaName)
-        val mangaDir = localRoot.findFile(mangaDirName) ?: localRoot.createDirectory(mangaDirName)
+        val mangaDir = localRoot.fastFindFile(mangaDirName) ?: localRoot.createDirectory(mangaDirName)
         return requireNotNull(mangaDir) { "Unable to create local source manga directory." }
     }
 
@@ -111,7 +146,7 @@ class HonyukaStorage(
     fun prepareLocalSourceExportTarget(chapter: ChapterEntry): DocumentFile {
         val mangaDir = localSourceMangaDirectory(chapter)
         val names = localChapterFileNames(chapter.chapterBaseName)
-        names.forEach { name -> mangaDir.findFile(name)?.delete() }
+        names.forEach { name -> mangaDir.fastFindFile(name)?.delete() }
         // octet-stream keeps the file name exactly as given; some providers rewrite
         // the extension for comic-book MIME types.
         return mangaDir.createFile("application/octet-stream", names.first())
@@ -121,7 +156,7 @@ class HonyukaStorage(
     /** Writes (or overwrites) [fileName] in the local manga folder. */
     fun writeLocalMangaFile(chapter: ChapterEntry, fileName: String, bytes: ByteArray) {
         val mangaDir = localSourceMangaDirectory(chapter)
-        val file = mangaDir.findFile(fileName)
+        val file = mangaDir.fastFindFile(fileName)
             ?: mangaDir.createFile("application/octet-stream", fileName)
             ?: error("Unable to create $fileName in the local source folder.")
         context.contentResolver.openOutputStream(file.uri, "wt").use { output ->
@@ -137,7 +172,7 @@ class HonyukaStorage(
         bytes: () -> ByteArray?,
     ) {
         val mangaDir = localSourceMangaDirectory(chapter)
-        if (mangaDir.findFile(fileName) != null) return
+        if (mangaDir.fastFindFile(fileName) != null) return
         val content = bytes() ?: return
         val file = mangaDir.createFile("application/octet-stream", fileName) ?: return
         context.contentResolver.openOutputStream(file.uri, "wt")?.use { it.write(content) }
@@ -155,15 +190,15 @@ class HonyukaStorage(
         translations: Map<String, PageTranslation>,
     ) {
         val root = requireNotNull(rootDirectory()) { "Storage root is not configured." }
-        val translationsRoot = root.findFile(TRANSLATIONS_DIR) ?: root.createDirectory(TRANSLATIONS_DIR)
+        val translationsRoot = root.fastFindFile(TRANSLATIONS_DIR) ?: root.createDirectory(TRANSLATIONS_DIR)
         requireNotNull(translationsRoot) { "Unable to create translations directory." }
 
-        val sourceDir = translationsRoot.findFile(chapter.sourceName) ?: translationsRoot.createDirectory(chapter.sourceName)
-        val mangaDir = sourceDir?.findFile(chapter.mangaName) ?: sourceDir?.createDirectory(chapter.mangaName)
+        val sourceDir = translationsRoot.fastFindFile(chapter.sourceName) ?: translationsRoot.createDirectory(chapter.sourceName)
+        val mangaDir = sourceDir?.fastFindFile(chapter.mangaName) ?: sourceDir?.createDirectory(chapter.mangaName)
         requireNotNull(mangaDir) { "Unable to create manga translation directory." }
 
         val fileName = "${buildValidFilename(chapter.chapterBaseName)}.json"
-        mangaDir.findFile(fileName)?.delete()
+        mangaDir.fastFindFile(fileName)?.delete()
         val file = mangaDir.createFile("application/json", fileName)
         requireNotNull(file) { "Unable to create translation JSON." }
 
@@ -179,7 +214,7 @@ class HonyukaStorage(
      */
     fun readTranslation(chapter: ChapterEntry): Map<String, PageTranslation>? {
         val root = rootDirectory() ?: return null
-        val translationsDir = root.findFile(TRANSLATIONS_DIR) ?: return null
+        val translationsDir = root.fastFindFile(TRANSLATIONS_DIR) ?: return null
         val file = translationFileFor(
             translationsDir = translationsDir,
             sourceName = chapter.sourceName,
@@ -209,45 +244,102 @@ class HonyukaStorage(
         chapterBaseName: String,
     ): DocumentFile? {
         return translationsDir
-            ?.findFile(sourceName)
-            ?.findFile(mangaName)
-            ?.findFile("${buildValidFilename(chapterBaseName)}.json")
+            ?.fastFindFile(sourceName)
+            ?.fastFindFile(mangaName)
+            ?.fastFindFile("${buildValidFilename(chapterBaseName)}.json")
     }
 
-    private fun isSupportedChapterContainer(file: DocumentFile): Boolean {
-        val name = file.name?.lowercase(Locale.ROOT) ?: return false
-        return file.isDirectory || (file.isFile && name.endsWith(".cbz"))
+    /** One child row of a SAF directory, read from a single cursor query. */
+    private data class DocEntry(
+        val documentId: String,
+        val name: String,
+        val mimeType: String,
+        val uri: Uri,
+    ) {
+        val isDirectory: Boolean get() = mimeType == DocumentsContract.Document.MIME_TYPE_DIR
     }
 
-    private fun isVisibleChapterContainer(file: DocumentFile): Boolean {
-        if (!isSupportedChapterContainer(file)) return false
-        val name = file.name.orEmpty()
+    /** Lists the children of [parentDocumentId] with one provider query. */
+    private fun listChildren(treeUri: Uri, parentDocumentId: String): List<DocEntry> {
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocumentId)
+        val projection = arrayOf(
+            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            DocumentsContract.Document.COLUMN_MIME_TYPE,
+        )
+        val entries = ArrayList<DocEntry>()
+        context.contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
+            while (cursor.moveToNext()) {
+                val documentId = cursor.getString(0) ?: continue
+                val name = cursor.getString(1) ?: continue
+                val mimeType = cursor.getString(2).orEmpty()
+                entries += DocEntry(
+                    documentId = documentId,
+                    name = name,
+                    mimeType = mimeType,
+                    uri = DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId),
+                )
+            }
+        }
+        return entries
+    }
+
+    /**
+     * Like [DocumentFile.findFile] but matches the name with a single cursor query
+     * instead of one getName() round-trip per child. Falls back to findFile() if the
+     * provider query fails.
+     */
+    private fun DocumentFile.fastFindFile(name: String): DocumentFile? {
+        val treeUri = preferences.rootUri() ?: return findFile(name)
+        return runCatching {
+            val match = listChildren(treeUri, DocumentsContract.getDocumentId(uri))
+                .firstOrNull { it.name == name }
+                ?: return@runCatching null
+            // listFiles() is a single query that only builds URIs (no per-child lookups).
+            listFiles().firstOrNull { it.uri == match.uri }
+                ?: DocumentFile.fromSingleUri(context, match.uri)?.takeUnless { match.isDirectory }
+        }.getOrElse { error ->
+            Log.w(TAG, "Fast lookup of $name failed; falling back to findFile()", error)
+            findFile(name)
+        }
+    }
+
+    private fun isVisibleChapterContainer(file: DocEntry): Boolean {
+        val name = file.name
+        val isChapter = file.isDirectory || name.lowercase(Locale.ROOT).endsWith(".cbz")
+        if (!isChapter) return false
         val baseName = name.removeSuffix(".cbz")
         // Mihon writes in-progress downloads to `<chapter>_tmp` / `<chapter>.cbz_tmp`
-        // and ignores them; so do we. Hidden entries are never chapters.
+        // and ignores them; so do we. Hidden entries are never chapters. Copies and
+        // backups left inside downloads/ by Honyuka 0.1.0 are skipped too.
         return !name.startsWith(".") &&
             !name.endsWith("_tmp") &&
             baseName != BACKUPS_DIR &&
             !baseName.endsWith(TRANSLATED_SUFFIX)
     }
 
-    private fun chapterThumbnailUri(chapterFile: DocumentFile): Uri? {
-        if (!chapterFile.isDirectory) return null
-        return collectImagePages(chapterFile)
-            .sortedByNaturalName()
+    /** First page image of a folder chapter (looks one level into subfolders). */
+    private fun firstImageUri(treeUri: Uri, directoryId: String, depth: Int): Uri? {
+        val children = listChildren(treeUri, directoryId).sortedByNaturalName()
+        children.firstOrNull { !it.isDirectory && isImageName(it.name) }?.let { return it.uri }
+        if (depth >= 1) return null
+        return children.asSequence()
+            .filter { it.isDirectory }
+            .mapNotNull { firstImageUri(treeUri, it.documentId, depth + 1) }
             .firstOrNull()
-            ?.uri
     }
 
-    private fun collectImagePages(directory: DocumentFile): List<DocumentFile> {
-        return directory.listFiles().flatMap { child ->
-            when {
-                child.isDirectory -> collectImagePages(child)
-                child.isFile && isImageName(child.name) -> listOf(child)
-                else -> emptyList()
-            }
-        }
+    private fun List<DocEntry>.sortedByNaturalName(): List<DocEntry> =
+        sortedWith { left, right -> naturalCompare(left.name, right.name) }
+
+    /** `MangaDex (EN)` → `en`, `Source (ES-419)` → `es`; null when there is no tag. */
+    private fun sourceLanguageTag(sourceFolderName: String): String? {
+        val tag = SOURCE_LANGUAGE_REGEX.find(sourceFolderName)?.groupValues?.getOrNull(1) ?: return null
+        return tag.lowercase(Locale.ROOT).takeUnless { it == "all" }
     }
+
+    private fun SourceLanguage.folderTag(): String =
+        languageTag.substringBefore('-').lowercase(Locale.ROOT)
 
     private fun isImageName(name: String?): Boolean {
         val lowered = name?.lowercase(Locale.ROOT) ?: return false
@@ -300,6 +392,8 @@ class HonyukaStorage(
     }
 
     private companion object {
+        const val TAG = "HonyukaStorage"
+        val SOURCE_LANGUAGE_REGEX = Regex("""\(([A-Za-z]{2,3})(?:-[A-Za-z0-9]+)?\)\s*$""")
         const val DOWNLOADS_DIR = "downloads"
         const val LOCAL_SOURCE_DIR = "local"
         const val TRANSLATIONS_DIR = "translations"
@@ -309,11 +403,6 @@ class HonyukaStorage(
     }
 }
 
-private fun List<DocumentFile>.sortedByNaturalName(): List<DocumentFile> {
-    return sortedWith { left, right ->
-        naturalCompare(left.name.orEmpty(), right.name.orEmpty())
-    }
-}
 
 private fun naturalCompare(left: String, right: String): Int {
     val leftParts = Regex("(\\d+|\\D+)").findAll(left).map { it.value }.toList()

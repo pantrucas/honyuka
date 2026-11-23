@@ -61,6 +61,8 @@ class HonyukaViewModel(
             themeMode = preferences.themeMode(),
             geminiApiKey = preferences.geminiApiKey(),
             deepLApiKey = preferences.deepLApiKey(),
+            filterSourcesByLanguage = preferences.filterSourcesByLanguage(),
+            googleFallback = preferences.googleFallback(),
         ),
     )
     val state: StateFlow<HonyukaUiState> = _state.asStateFlow()
@@ -81,19 +83,28 @@ class HonyukaViewModel(
         override fun onReceive(context: Context, intent: Intent) {
             val success = intent.getBooleanExtra(TranslationService.EXTRA_RESULT_SUCCESS, false)
             val error = intent.getStringExtra(TranslationService.EXTRA_RESULT_ERROR)
+            val warning = intent.getStringExtra(TranslationService.EXTRA_RESULT_WARNING)
             val storageKey = intent.getStringExtra(TranslationService.EXTRA_STORAGE_KEY).orEmpty()
 
             if (success) {
-                Toast.makeText(appContext, "Translation completed", Toast.LENGTH_SHORT).show()
+                Toast.makeText(
+                    appContext,
+                    if (warning == null) "Translation completed" else "Translation completed with warnings",
+                    Toast.LENGTH_LONG,
+                ).show()
                 viewModelScope.launch {
-                    val chapters = withContext(Dispatchers.IO) { storage.scanChapters() }
+                    val chapters = withContext(Dispatchers.IO) { scanChapters() }
                     _state.update {
                         it.copy(
                             chapters = chapters,
                             isBusy = false,
                             activeChapterKey = null,
-                            activeJob = ActiveJob("Completed", "Translation saved for $storageKey", 1f),
-                            message = null,
+                            activeJob = ActiveJob(
+                                if (warning == null) "Completed" else "Completed with warnings",
+                                "Translation saved for $storageKey",
+                                1f,
+                            ),
+                            message = warning,
                         )
                     }
                 }
@@ -234,9 +245,27 @@ class HonyukaViewModel(
     }
 
     fun onSourceLanguageSelected(language: SourceLanguage) {
+        val changed = language != state.value.sourceLanguage
         preferences.saveSourceLanguage(language)
         _state.update { it.copy(sourceLanguage = language) }
+        if (changed && state.value.filterSourcesByLanguage) refresh()
     }
+
+    fun onFilterSourcesByLanguageChanged(enabled: Boolean) {
+        preferences.saveFilterSourcesByLanguage(enabled)
+        _state.update { it.copy(filterSourcesByLanguage = enabled) }
+        refresh()
+    }
+
+    fun onGoogleFallbackChanged(enabled: Boolean) {
+        preferences.saveGoogleFallback(enabled)
+        _state.update { it.copy(googleFallback = enabled) }
+    }
+
+    /** Scans downloads, skipping sources in other languages when the filter is on. */
+    private fun scanChapters() = storage.scanChapters(
+        onlyLanguage = if (preferences.filterSourcesByLanguage()) preferences.sourceLanguage() else null,
+    )
 
     fun onTargetLanguageSelected(language: TargetLanguage) {
         preferences.saveTargetLanguage(language)
@@ -317,7 +346,7 @@ class HonyukaViewModel(
                 )
             }
             runCatching {
-                withContext(Dispatchers.IO) { storage.scanChapters() }
+                withContext(Dispatchers.IO) { scanChapters() }
             }.onSuccess { chapters ->
                 _state.update {
                     it.copy(
@@ -399,6 +428,7 @@ class HonyukaViewModel(
             deepLApiKey = currentState.deepLApiKey,
             localModel = currentState.localModel,
             localBackend = currentState.localBackend,
+            googleFallback = currentState.googleFallback,
             confirmed = false,
         )
         ContextCompat.startForegroundService(appContext, intent)
@@ -423,6 +453,7 @@ class HonyukaViewModel(
             deepLApiKey = currentState.deepLApiKey,
             localModel = currentState.localModel,
             localBackend = currentState.localBackend,
+            googleFallback = currentState.googleFallback,
             confirmed = true,
         )
         ContextCompat.startForegroundService(appContext, intent)

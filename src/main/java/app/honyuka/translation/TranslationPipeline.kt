@@ -135,36 +135,54 @@ class TranslationPipeline(
         deepLApiKey: String,
         localModel: LocalModel = LocalModel.DEFAULT,
         localBackend: LocalBackend = LocalBackend.AUTO,
+        googleFallback: Boolean = false,
         onChunkSaved: (done: Int, total: Int) -> Unit = { _, _ -> },
         onProgress: (title: String, detail: String, progress: Float) -> Unit,
-    ) {
+    ): String? {
         onProgress("Translating text", "Using ${translationEngine.label} for manga dialogue", 0.65f)
-        createTranslationEngine(
-            context = context,
-            engine = translationEngine,
-            sourceLanguage = sourceLanguage,
-            targetLanguage = targetLanguage,
-            geminiApiKey = geminiApiKey,
-            geminiModelName = geminiModelName,
-            deepLApiKey = deepLApiKey,
-            localModel = localModel,
-            localBackend = localBackend,
-            onChunkDone = { done, total ->
-                onChunkSaved(done, total)
-                onProgress(
-                    "Translating text",
-                    when {
-                        done >= total -> "All $total parts translated"
-                        translationEngine == TranslationEngine.ON_DEVICE -> "On-device: part ${done + 1} of $total"
-                        else -> "Gemini: part ${done + 1} of $total"
-                    },
-                    0.65f + 0.3f * done / total.coerceAtLeast(1),
-                )
-            },
-        ).use { translator ->
-            translator.translate(pageTranslations)
+        var fallbackNotice: String? = null
+        try {
+            createTranslationEngine(
+                context = context,
+                engine = translationEngine,
+                sourceLanguage = sourceLanguage,
+                targetLanguage = targetLanguage,
+                geminiApiKey = geminiApiKey,
+                geminiModelName = geminiModelName,
+                deepLApiKey = deepLApiKey,
+                localModel = localModel,
+                localBackend = localBackend,
+                onChunkDone = { done, total ->
+                    onChunkSaved(done, total)
+                    onProgress(
+                        "Translating text",
+                        when {
+                            done >= total -> "All $total parts translated"
+                            translationEngine == TranslationEngine.ON_DEVICE -> "On-device: part ${done + 1} of $total"
+                            else -> "Gemini: part ${done + 1} of $total"
+                        },
+                        0.65f + 0.3f * done / total.coerceAtLeast(1),
+                    )
+                },
+            ).use { translator ->
+                translator.translate(pageTranslations)
+            }
+        } catch (e: TranslationStoppedException) {
+            throw e
+        } catch (e: Exception) {
+            if (!googleFallback || translationEngine != TranslationEngine.GEMINI) throw e
+            // Gemini failed (quota, key, model…). Whatever it already translated is kept;
+            // Google Translate only fills the bubbles that are still untranslated.
+            Log.w("HonyukaPipeline", "Gemini failed; falling back to Google Translate", e)
+            onProgress("Translating text", "Gemini failed — finishing with Google Translate", 0.9f)
+            GoogleTranslateWebEngine(sourceLanguage, targetLanguage).use { fallback ->
+                fallback.translate(pageTranslations)
+            }
+            fallbackNotice = "Gemini failed (${e.message ?: e.javaClass.simpleName}). " +
+                "The remaining bubbles were translated with Google Translate."
         }
         onProgress("Saving sidecar", "Preparing reader-compatible JSON output", 0.95f)
+        return fallbackNotice
     }
 
     /**
