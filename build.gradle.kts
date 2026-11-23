@@ -11,11 +11,11 @@ android {
 
     defaultConfig {
         // Fork: own id so it installs next to the original Honyuka.
-        applicationId = "app.globito"
+        applicationId = "app.honyuka.turbo"
         minSdk = 26
         targetSdk = 35
         versionCode = 3
-        versionName = "0.2.0-globito"
+        versionName = "0.2.0-turbo"
 
         // LiteRT-LM ships arm64 native code only; keeps the APK small.
         ndk {

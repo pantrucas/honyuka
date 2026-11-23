@@ -4,13 +4,13 @@
 
 # Honyuka v0.2.0
 
-> **Globito (fork de Honyuka) — cambios de este fork**
+> **Honyuka Turbo (fork de Honyuka) — cambios de este fork**
 >
 > - **Búsqueda rápida:** cada carpeta se lee con una sola consulta (antes era una por archivo). Una carpeta con 167 capítulos ahora tarda segundos y no media hora.
 > - **Filtro por idioma:** opción (activada por defecto) para mostrar solo las fuentes de Mihon del idioma de origen, por ejemplo `(EN)`. Las fuentes en otros idiomas, como `(ES)`, ni siquiera se revisan.
 > - **Avisos honestos:** si quedan globos sin traducir, la app termina con «Completed with warnings» y dice cuántos quedaron, en vez de decir «Completado».
 > - **Plan B opcional:** si Gemini falla (cuota llena, clave mala), puede terminar el capítulo con Google Translate y avisar que lo hizo.
-> - **Nombre propio:** se instala como *Globito* (`app.globito`), al lado del Honyuka original.
+> - **Nombre propio:** se instala como *Honyuka Turbo* (`app.honyuka.turbo`), al lado del Honyuka original.
 > - **Compilación automática:** GitHub Actions compila el APK en cada cambio y lo publica en el release `latest`.
 
 Honyuka (ほにゅか, a playful mispronunciation of *honyakuya*, "translator") is an Android app that translates the manga chapters you've downloaded in [Mihon](https://mihon.app/) and puts the translated chapter back into Mihon's **Local source**, ready to read.
