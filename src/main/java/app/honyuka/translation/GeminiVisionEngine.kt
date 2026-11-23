@@ -160,7 +160,7 @@ internal class GeminiVisionEngine(
                     // Both models saturated: high demand is usually over within a minute or two.
                     busyWaits++
                     Log.w(TAG, "Gemini busy; waiting before retry $busyWaits/$BUSY_WAITS")
-                    waitUnlessStopped(BUSY_WAIT_MS * busyWaits)
+                    waitUnlessStopped((BUSY_WAIT_MS * busyWaits).coerceAtMost(120_000L))
                     modelName = originalModel
                     continue
                 }
@@ -452,7 +452,7 @@ Return ONLY lines that have a real error: a misspelled or non-existent word (e.g
         private const val MAX_GLOSSARY = 120
         private const val INTER_REQUEST_DELAY_MS = 4_000L
         private const val PROOFREAD_LINES_PER_REQUEST = 200
-        private const val BUSY_WAITS = 3
+        private const val BUSY_WAITS = 5
         private const val BUSY_WAIT_MS = 30_000L
 
         /** Style guidance per target language; Spanish is neutral Latin American. */

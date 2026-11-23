@@ -174,6 +174,17 @@ class TranslationPipeline(
         } catch (e: TranslationStoppedException) {
             throw e
         } catch (e: Exception) {
+            if (translationEngine == TranslationEngine.GEMINI && isGeminiQuotaExhausted(e)) {
+                // Overloaded or out of quota: temporary. Google Translate would only lower the
+                // quality, so keep what Gemini finished and let the user (or auto-translate) retry.
+                val all = pageTranslations.values.sumOf { it.blocks.size }
+                val left = pageTranslations.values.sumOf { page -> page.blocks.count { it.needsTranslation() } }
+                throw IllegalStateException(
+                    "Gemini is overloaded right now (very high demand on Google's side). " +
+                        "${all - left} of $all bubbles are done and saved — tap Retry in a while to finish the rest.",
+                    e,
+                )
+            }
             if (!googleFallback || translationEngine != TranslationEngine.GEMINI) throw e
             // Gemini failed (quota, key, model…). Whatever it already translated is kept;
             // Google Translate only fills the bubbles that are still untranslated.
