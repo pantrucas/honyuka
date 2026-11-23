@@ -47,13 +47,13 @@ jobs:
           chmod +x gradlew
           ./gradlew --no-daemon assembleRelease
           mkdir -p dist
-          cp "$(find build/outputs/apk/release -name '*.apk' | head -n 1)" dist/Honyuka-CL.apk
+          cp "$(find build/outputs/apk/release -name '*.apk' | head -n 1)" dist/Globito.apk
           ls -la dist
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Honyuka-CL
-          path: dist/Honyuka-CL.apk
+          name: Globito
+          path: dist/Globito.apk
 
       - name: Move the "latest" tag to this commit
         run: |
@@ -64,9 +64,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          name: Honyuka CL (latest build)
+          name: Globito (última versión)
           prerelease: true
           body: |
             Built automatically from ${{ github.ref_name }} @ ${{ github.sha }}.
-            Download **Honyuka-CL.apk** below.
-          files: dist/Honyuka-CL.apk
+            Download **Globito.apk** below.
+          files: dist/Globito.apk

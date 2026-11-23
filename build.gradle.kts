@@ -11,11 +11,11 @@ android {
 
     defaultConfig {
         // Fork: own id so it installs next to the original Honyuka.
-        applicationId = "app.honyuka.cl"
+        applicationId = "app.globito"
         minSdk = 26
         targetSdk = 35
         versionCode = 3
-        versionName = "0.2.0-cl"
+        versionName = "0.2.0-globito"
 
         // LiteRT-LM ships arm64 native code only; keeps the APK small.
         ndk {
