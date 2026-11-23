@@ -10,6 +10,7 @@ import app.honyuka.model.PageTranslation
 import app.honyuka.model.SourceLanguage
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.encodeToString
+import java.io.File
 import java.io.OutputStream
 import java.util.Locale
 
@@ -207,6 +208,48 @@ class HonyukaStorage(
             output.write(Json.encodeToString(translations).toByteArray())
         }
     }
+
+    /**
+     * Renames the chapter's saved translation to `<name>.json.bak` (never deletes it),
+     * so the next run starts from fresh OCR. Returns false when there was nothing to move.
+     */
+    fun backupTranslation(chapter: ChapterEntry): Boolean {
+        val root = rootDirectory() ?: return false
+        val translationsDir = root.fastFindFile(TRANSLATIONS_DIR) ?: return false
+        val file = translationFileFor(
+            translationsDir = translationsDir,
+            sourceName = chapter.sourceName,
+            mangaName = chapter.mangaName,
+            chapterBaseName = chapter.chapterBaseName,
+        ) ?: return false
+        val baseName = file.name ?: return false
+        val parent = file.parentFile
+        var backupName = "$baseName.bak"
+        if (parent?.fastFindFile(backupName) != null) {
+            backupName = "$baseName.${System.currentTimeMillis()}.bak"
+        }
+        return file.renameTo(backupName)
+    }
+
+    /** Names/terms glossary shared by every chapter of [mangaName] (app-private storage). */
+    fun readGlossary(mangaName: String): MutableMap<String, String> {
+        val file = glossaryFile(mangaName)
+        if (!file.exists()) return mutableMapOf()
+        return runCatching {
+            Json.decodeFromString<Map<String, String>>(file.readText()).toMutableMap()
+        }.getOrElse { mutableMapOf() }
+    }
+
+    fun writeGlossary(mangaName: String, glossary: Map<String, String>) {
+        runCatching {
+            val file = glossaryFile(mangaName)
+            file.parentFile?.mkdirs()
+            file.writeText(Json.encodeToString(glossary))
+        }
+    }
+
+    private fun glossaryFile(mangaName: String): File =
+        File(File(context.filesDir, "glossary"), "${buildValidFilename(mangaName)}.json")
 
     /**
      * Load a previously saved translation sidecar for the given chapter.

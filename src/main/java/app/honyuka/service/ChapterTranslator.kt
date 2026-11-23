@@ -77,6 +77,7 @@ class ChapterTranslator(private val context: Context) {
         chapter: ChapterEntry,
         settings: TranslationSettings,
         rerenderOnly: Boolean = false,
+        fromScratch: Boolean = false,
         requireConfirmation: Boolean = false,
         failIfNothingTranslated: Boolean = false,
         onChunkSaved: (done: Int, total: Int) -> Unit = { _, _ -> },
@@ -86,6 +87,10 @@ class ChapterTranslator(private val context: Context) {
             storage.resolveOriginalChapterDocument(chapter)
         } ?: error("Unable to open chapter ${chapter.chapterDisplayName}")
 
+        if (fromScratch && !rerenderOnly) {
+            // Keep the old result as `.json.bak`; the run below then redoes OCR and translation.
+            withContext(Dispatchers.IO) { storage.backupTranslation(chapter) }
+        }
         val saved = storage.readTranslation(chapter)
         var translations = saved
         val warnings = mutableListOf<String>()
@@ -124,6 +129,14 @@ class ChapterTranslator(private val context: Context) {
                     if (chunks > 0) return ChapterRunOutcome.NeedsConfirmation(chunks, blocks)
                 }
 
+                // Gemini sees each page image; other engines only need the text.
+                val pageImage = if (settings.engine == TranslationEngine.GEMINI) {
+                    withContext(Dispatchers.IO) { pipeline.pageImageLoader(chapter, chapterDocument) }
+                } else {
+                    null
+                }
+                val glossary = storage.readGlossary(chapter.mangaName)
+
                 @Suppress("UNCHECKED_CAST")
                 val mutableTranslations = translations as MutableMap<String, PageTranslation>
                 // On-device inference can take many minutes; keep the CPU awake meanwhile.
@@ -146,6 +159,8 @@ class ChapterTranslator(private val context: Context) {
                         localModel = settings.localModel,
                         localBackend = settings.localBackend,
                         googleFallback = settings.googleFallback,
+                        pageImage = pageImage,
+                        glossary = glossary,
                         // Save after every request so a later failure never loses paid-for work.
                         onChunkSaved = { done, total ->
                             if (done > 0) storage.writeTranslation(chapter, mutableTranslations)
@@ -155,6 +170,7 @@ class ChapterTranslator(private val context: Context) {
                     )?.let { fallbackNotice -> warnings += fallbackNotice }
                 } finally {
                     wakeLock?.takeIf { it.isHeld }?.release()
+                    if (settings.engine == TranslationEngine.GEMINI) storage.writeGlossary(chapter.mangaName, glossary)
                 }
                 onProgress("Saving translation", chapter.chapterDisplayName, 0.95f)
                 storage.writeTranslation(chapter, translations)
@@ -168,7 +184,7 @@ class ChapterTranslator(private val context: Context) {
                 }
                 if (untranslated > 0) {
                     warnings += "$untranslated of ${translations.values.sumOf { it.blocks.size }} bubbles are " +
-                        "still in the original language (names and sound effects are often left as-is). " +
+                        "still in the original language. " +
                         "Tap Translate again to retry only those."
                 }
             }

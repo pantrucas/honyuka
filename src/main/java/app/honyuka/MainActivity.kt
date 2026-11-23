@@ -276,6 +276,7 @@ private fun HonyukaApp(
                                 isRunning = state.activeChapterKey == chapter.storageKey,
                                 onTranslate = { viewModel.translateChapter(chapter) },
                                 onRerender = { viewModel.reRenderChapter(chapter) },
+                                onFromScratch = { viewModel.translateChapter(chapter, fromScratch = true) },
                             )
                         }
                     }
@@ -822,6 +823,7 @@ private fun ChapterCard(
     isRunning: Boolean,
     onTranslate: () -> Unit,
     onRerender: () -> Unit,
+    onFromScratch: () -> Unit,
 ) {
     val c = Kawaii.colors
     KawaiiCard(contentPadding = PaddingValues(14.dp)) {
@@ -849,6 +851,7 @@ private fun ChapterCard(
             )
             if (chapter.translated) {
                 PillButton("Re-render", onClick = onRerender, enabled = enabled, style = PillStyle.SOFT, compact = true)
+                PillButton("From scratch", onClick = onFromScratch, enabled = enabled, style = PillStyle.SOFT, compact = true)
             }
         }
     }

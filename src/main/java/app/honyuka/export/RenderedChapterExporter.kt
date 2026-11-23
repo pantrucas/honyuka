@@ -53,14 +53,22 @@ class RenderedChapterExporter(
 
         /** Tall OCR columns (vertical Japanese) are widened at most this many times. */
         const val MAX_PLACEMENT_WIDEN_FACTOR = 3f
-        const val MAX_COLLISION_SHIFT_STEPS = 6
+        /** Text may only nudge one small step away from its own bubble. */
+        const val MAX_COLLISION_SHIFT_STEPS = 1
+        const val COLLISION_SHIFT_FRACTION = 0.15f
         const val TEXT_COLLISION_PADDING_PX = 6f
         const val LIGHT_REGION_LUMINANCE_THRESHOLD = 220
         const val PRECISE_MASK_PADDING_PX = 2
         const val MIN_BALANCE_WIDTH_PX = 40
         const val BALANCE_WIDTH_STEP_PX = 4
         const val SOFT_OVERLAY_STEPS = 5
-        val COLLISION_TEXT_SCALE_FACTORS = floatArrayOf(1f, 0.92f, 0.84f, 0.76f)
+        val COLLISION_TEXT_SCALE_FACTORS = floatArrayOf(1f, 0.9f, 0.8f, 0.7f)
+
+        /** Translated text is drawn at most this much larger than the original lettering. */
+        const val MAX_SIZE_VS_ORIGINAL = 1.12f
+
+        /** Cap height of animeace as a fraction of the text size (868 / 1024 units). */
+        const val FONT_CAP_HEIGHT_RATIO = 0.85f
 
         /** Max pixel gap between two blocks to merge them at render time. */
         const val RENDER_MERGE_GAP_PX = 15f
@@ -72,8 +80,20 @@ class RenderedChapterExporter(
         val IMAGE_EXTENSIONS = setOf("jpg", "jpeg", "png", "webp", "gif", "avif", "heif", "heic", "jxl", "bmp")
     }
 
-    private val translationTypeface: Typeface =
-        ResourcesCompat.getFont(context, R.font.animeace) ?: Typeface.DEFAULT_BOLD
+    /** animeace has no ¡ ¿ —; comic_book fills those in so no system font sneaks in. */
+    private val translationTypeface: Typeface = runCatching {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val main = android.graphics.fonts.FontFamily.Builder(
+                android.graphics.fonts.Font.Builder(context.resources, R.font.animeace).build(),
+            ).build()
+            val fallback = android.graphics.fonts.FontFamily.Builder(
+                android.graphics.fonts.Font.Builder(context.resources, R.font.comic_book).build(),
+            ).build()
+            Typeface.CustomFallbackBuilder(main).addCustomFallback(fallback).build()
+        } else {
+            null
+        }
+    }.getOrNull() ?: ResourcesCompat.getFont(context, R.font.animeace) ?: Typeface.DEFAULT_BOLD
 
     /**
      * Renders the chapter into `local/<manga> (Honyuka)/<chapter>.cbz` — the layout
@@ -319,7 +339,11 @@ class RenderedChapterExporter(
         pageName: String,
         translation: PageTranslation,
     ): RenderedPage {
-        val drawableBlocks = translation.blocks.filterNot { it.needsTranslation() }
+        // "keep" bubbles (sound effects, names) stay as drawn; untranslated ones are left
+        // alone rather than blanked. "erase" bubbles are cleaned but get no text.
+        val drawableBlocks = translation.blocks.filter { block ->
+            block.mode != TranslationBlock.MODE_KEEP && !block.needsTranslation()
+        }
         if (drawableBlocks.isEmpty()) {
             return RenderedPage(pageName, originalBytes)
         }
@@ -339,8 +363,8 @@ class RenderedChapterExporter(
             val mergedBlocks = mergeOverlappingRenderBlocks(drawableBlocks)
             val renderPlans = buildRenderPlans(mergedBlocks, bitmap.width, bitmap.height, bitmap)
             renderPlans.forEach { plan -> cleanupSourceText(bitmap, canvas, plan) }
-            renderPlans.forEach { plan -> drawTranslationBackground(canvas, plan) }
-            renderPlans.forEach { plan -> drawTranslationText(canvas, plan) }
+            renderPlans.filter { it.hasText }.forEach { plan -> drawTranslationBackground(canvas, plan) }
+            renderPlans.filter { it.hasText }.forEach { plan -> drawTranslationText(canvas, plan) }
             return RenderedPage(
                 fileName = translatedPageName(pageName, outputFormat),
                 bytes = compressBitmap(bitmap, outputFormat),
@@ -407,10 +431,10 @@ class RenderedChapterExporter(
         val newBottom = max(a.y + a.height, b.y + b.height)
         // Combine translations with line break to preserve readability
         val combinedTranslation = if (a.y <= b.y) {
-            "${a.translation} ${b.translation}"
+            listOf(a.translation, b.translation)
         } else {
-            "${b.translation} ${a.translation}"
-        }
+            listOf(b.translation, a.translation)
+        }.filter { it.isNotBlank() }.joinToString(" ")
         return TranslationBlock(
             text = "${a.text} ${b.text}",
             translation = combinedTranslation.trim(),
@@ -421,6 +445,7 @@ class RenderedChapterExporter(
             symHeight = max(a.symHeight, b.symHeight),
             symWidth = max(a.symWidth, b.symWidth),
             angle = a.angle,
+            mode = if (combinedTranslation.isBlank()) TranslationBlock.MODE_ERASE else "",
         )
     }
 
@@ -448,11 +473,14 @@ class RenderedChapterExporter(
         occupiedTextRegions: List<RectF>,
         sampleBitmap: Bitmap,
     ): RenderedBlockPlan? {
-        if (block.translation.isBlank()) return null
-
         val cleanupRect = buildCleanupRect(block)
-        val placementRect = buildPlacementRect(block)
         val regionStyle = sampleRegionStyle(sampleBitmap, cleanupRect)
+        if (block.translation.isBlank()) {
+            // Its words were moved into a neighbouring bubble: erase only.
+            return cleanupOnlyPlan(cleanupRect, regionStyle, block)
+        }
+
+        val placementRect = buildPlacementRect(block)
         val candidateDeltas = buildCandidateDeltas(
             basePlacementRect = placementRect,
             block = block,
@@ -463,8 +491,9 @@ class RenderedChapterExporter(
         var bestPlan: RenderedBlockPlan? = null
         var bestOverlapArea = Float.POSITIVE_INFINITY
 
-        COLLISION_TEXT_SCALE_FACTORS.forEach { textScale ->
-            candidateDeltas.forEach { (dx, dy) ->
+        // Shrink first, move last: text stays in its own bubble whenever possible.
+        candidateDeltas.forEach { (dx, dy) ->
+            COLLISION_TEXT_SCALE_FACTORS.forEach { textScale ->
                 val plan = buildBlockPlan(
                     block = block,
                     pageWidth = pageWidth,
@@ -487,6 +516,37 @@ class RenderedChapterExporter(
         return bestPlan
     }
 
+    private fun cleanupOnlyPlan(
+        cleanupRect: RectF,
+        style: RegionRenderStyle,
+        block: TranslationBlock,
+    ): RenderedBlockPlan {
+        val empty = createLayout("", baseTextPaint(10f, style.textColor, 0f, Paint.Style.FILL), 1, 0f)
+        return RenderedBlockPlan(
+            cleanupRect = cleanupRect,
+            backgroundRect = RectF(),
+            contentRect = RectF(),
+            angle = 0f,
+            pivotX = 0f,
+            pivotY = 0f,
+            fillLayout = empty,
+            strokeLayout = empty,
+            textX = 0f,
+            textY = 0f,
+            occupiedTextRect = RectF(),
+            style = style,
+            hasText = false,
+            glyphHeight = originalGlyphHeight(block),
+        )
+    }
+
+    /** Height of one original capital letter, robust to a tiny first symbol such as "…". */
+    private fun originalGlyphHeight(block: TranslationBlock): Float {
+        val lines = block.text.count { it == '\n' } + 1
+        val perLine = block.height / lines
+        return max(block.symHeight, perLine * 0.7f).coerceAtMost(perLine.coerceAtLeast(1f))
+    }
+
     private fun buildBlockPlan(
         block: TranslationBlock,
         pageWidth: Int,
@@ -499,7 +559,15 @@ class RenderedChapterExporter(
         val contentRect = buildContentRect(placementRect)
         val contentWidth = max(ceil(contentRect.width()).toInt(), 1)
         val contentHeight = max(ceil(contentRect.height()).toInt(), 1)
-        val textSpec = buildBestFitTextSpec(block.translation, contentWidth, contentHeight, textScale, style, pageWidth)
+        val textSpec = buildBestFitTextSpec(
+            text = block.translation.uppercase(Locale.ROOT),
+            width = contentWidth,
+            height = contentHeight,
+            textScale = textScale,
+            style = style,
+            pageWidth = pageWidth,
+            originalSize = originalGlyphHeight(block) / FONT_CAP_HEIGHT_RATIO,
+        )
         val textX = contentRect.left
         val textY = contentRect.top + max((contentRect.height() - textSpec.fillLayout.height) / 2f, 0f)
         val actualTextBounds = buildActualTextBounds(contentRect, textY, textSpec.fillLayout)
@@ -527,6 +595,7 @@ class RenderedChapterExporter(
             textY = textY,
             occupiedTextRect = occupiedTextRect,
             style = style,
+            glyphHeight = originalGlyphHeight(block),
         )
     }
 
@@ -536,7 +605,7 @@ class RenderedChapterExporter(
         plan: RenderedBlockPlan,
     ) {
         if (plan.style.isLightBackground) {
-            eraseDarkTextPixels(bitmap, plan.cleanupRect, plan.style.cleanupColor, plan.style.referenceLuminance)
+            eraseDarkTextPixels(bitmap, plan.cleanupRect, plan.style.cleanupColor, plan.style.referenceLuminance, plan.glyphHeight)
         } else {
             drawSoftCleanupOverlay(canvas, plan.cleanupRect, plan.style.cleanupColor)
         }
@@ -547,6 +616,7 @@ class RenderedChapterExporter(
         cleanupRect: RectF,
         cleanupColor: Int,
         referenceLuminance: Int,
+        glyphHeight: Float,
     ) {
         val clippedRect = clampRectToBitmap(cleanupRect, bitmap.width, bitmap.height)
         if (clippedRect.isEmpty) return
@@ -558,19 +628,18 @@ class RenderedChapterExporter(
         val pixels = IntArray(width * height)
         bitmap.getPixels(pixels, 0, width, clippedRect.left, clippedRect.top, width, height)
 
-        val darkThreshold = (referenceLuminance - if (referenceLuminance >= 238) 26 else 34).coerceIn(32, 200)
+        // Catch the light-grey anti-aliased letter edges too, then paint every hit solid:
+        // half-blended pixels are what left the "ghost" letters behind.
+        val darkThreshold = (referenceLuminance - 14).coerceIn(32, 236)
         val mask = BooleanArray(pixels.size)
         pixels.indices.forEach { index ->
             mask[index] = luminanceOf(pixels[index]) <= darkThreshold
         }
-        val expandedMask = dilateMask(mask, width, height)
+        val radius = (glyphHeight * 0.08f).roundToInt().coerceIn(1, 3)
+        var expandedMask = mask
+        repeat(radius) { expandedMask = dilateMask(expandedMask, width, height) }
         pixels.indices.forEach { index ->
-            if (!expandedMask[index]) return@forEach
-            val original = pixels[index]
-            val originalLuminance = luminanceOf(original)
-            val blendFactor = (0.72f + ((darkThreshold - originalLuminance).coerceAtLeast(0) / darkThreshold.toFloat()) * 0.28f)
-                .coerceIn(0.72f, 1f)
-            pixels[index] = blendColors(original, cleanupColor, blendFactor)
+            if (expandedMask[index]) pixels[index] = cleanupColor
         }
 
         bitmap.setPixels(pixels, 0, width, clippedRect.left, clippedRect.top, width, height)
@@ -601,7 +670,7 @@ class RenderedChapterExporter(
             )
         }
 
-        paint.color = Color.argb(232, red, green, blue)
+        paint.color = Color.rgb(red, green, blue)
         canvas.drawRoundRect(cleanupRect, baseRadius, baseRadius, paint)
     }
 
@@ -640,41 +709,51 @@ class RenderedChapterExporter(
         textScale: Float,
         style: RegionRenderStyle,
         pageWidth: Int,
+        originalSize: Float,
     ): TextLayoutSpec {
         val minimumSize = max(MIN_TEXT_SIZE_PX, pageWidth / PAGE_WIDTH_PER_MIN_TEXT_PX)
         val pageMaximum = max(MAX_TEXT_SIZE_PX, pageWidth / PAGE_WIDTH_PER_MAX_TEXT_PX)
-        val maximumSize = max(minimumSize, min(pageMaximum, min(width, height)))
-        var low = minimumSize
-        var high = maximumSize
-        var best: TextLayoutSpec? = null
+        // Never letter bigger than the original text: oversized text spills out of the bubble.
+        val originalMaximum = (originalSize * MAX_SIZE_VS_ORIGINAL).roundToInt().coerceAtLeast(minimumSize)
+        val maximumSize = max(minimumSize, minOf(pageMaximum, min(width, height), originalMaximum))
+        fun search(floor: Int, hyphenate: Boolean): TextLayoutSpec? {
+            var low = floor
+            var high = maximumSize
+            var best: TextLayoutSpec? = null
+            while (low <= high) {
+                val mid = (low + high) / 2
+                val candidate = createTextLayoutSpec(
+                    text = text,
+                    width = width,
+                    height = height,
+                    textSize = (mid * textScale).coerceAtLeast(minimumSize.toFloat()),
+                    style = style,
+                    allowHyphenation = hyphenate,
+                )
+                if (candidate.fits) {
+                    best = candidate
+                    low = mid + 1
+                } else {
+                    high = mid - 1
+                }
+            }
+            return best
+        }
 
-        while (low <= high) {
-            val mid = (low + high) / 2
-            val candidate = createTextLayoutSpec(
+        // 1) Whole words only, down to ~60% of the original lettering size.
+        // 2) Then allow splitting long words at a syllable with a visible hyphen.
+        // 3) Last resort: hyphenated at the minimum size.
+        val wholeWordFloor = max(minimumSize, (originalSize * 0.6f).roundToInt()).coerceAtMost(maximumSize)
+        return search(wholeWordFloor, hyphenate = false)
+            ?: search(minimumSize, hyphenate = true)
+            ?: createTextLayoutSpec(
                 text = text,
                 width = width,
                 height = height,
-                textSize = (mid * textScale).coerceAtLeast(minimumSize.toFloat()),
+                textSize = minimumSize.toFloat(),
                 style = style,
+                allowHyphenation = true,
             )
-            if (candidate.fits) {
-                best = candidate
-                low = mid + 1
-            } else {
-                high = mid - 1
-            }
-        }
-
-        // Nothing fits even at the minimum size (usually one long word in a narrow
-        // bubble): let StaticLayout hyphenate instead of overflowing the box.
-        return best ?: createTextLayoutSpec(
-            text = text,
-            width = width,
-            height = height,
-            textSize = minimumSize.toFloat(),
-            style = style,
-            allowHyphenation = true,
-        )
     }
 
     private fun createTextLayoutSpec(
@@ -699,18 +778,23 @@ class RenderedChapterExporter(
         )
         val lineSpacingExtra = max(1f, textSize * 0.18f)
         val usableWidth = max(1, width - ceil(strokePaint.strokeWidth * 2f).toInt())
-        val wrappedText = if (allowHyphenation) {
-            text.trim()
+        val lines = if (allowHyphenation) {
+            wrapText(text, fillPaint, usableWidth, hyphenate = true)
         } else {
-            balanceText(text, fillPaint, usableWidth).joinToString("\n")
+            balanceText(text, fillPaint, usableWidth)
         }
-        val fillLayout = createLayout(wrappedText, fillPaint, usableWidth, lineSpacingExtra, allowHyphenation)
-        val strokeLayout = createLayout(wrappedText, strokePaint, usableWidth, lineSpacingExtra, allowHyphenation)
+        val wrappedText = lines.joinToString("\n")
+        // Our own line breaks are final; StaticLayout gets a little slack so it never
+        // re-breaks a line (that is what cut words without a hyphen).
+        val layoutWidth = usableWidth + 2
+        val fillLayout = createLayout(wrappedText, fillPaint, layoutWidth, lineSpacingExtra)
+        val strokeLayout = createLayout(wrappedText, strokePaint, layoutWidth, lineSpacingExtra)
+        val linesFit = lines.all { fillPaint.measureText(it) <= usableWidth } && fillLayout.lineCount == lines.size
         return TextLayoutSpec(
             fillLayout = fillLayout,
             strokeLayout = strokeLayout,
             textSize = textSize,
-            fits = fillLayout.fitsInside(usableWidth, height),
+            fits = linesFit && fillLayout.height <= height,
         )
     }
 
@@ -739,16 +823,13 @@ class RenderedChapterExporter(
         paint: TextPaint,
         width: Int,
         lineSpacingExtra: Float,
-        allowHyphenation: Boolean = false,
     ): StaticLayout {
         return StaticLayout.Builder
             .obtain(text, 0, text.length, paint, max(width, 1))
             .setAlignment(Layout.Alignment.ALIGN_CENTER)
             .setIncludePad(false)
             .setBreakStrategy(Layout.BREAK_STRATEGY_HIGH_QUALITY)
-            .setHyphenationFrequency(
-                if (allowHyphenation) Layout.HYPHENATION_FREQUENCY_NORMAL else Layout.HYPHENATION_FREQUENCY_NONE,
-            )
+            .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE)
             .setLineSpacing(lineSpacingExtra, 1f)
             .build()
     }
@@ -757,6 +838,7 @@ class RenderedChapterExporter(
         text: String,
         paint: TextPaint,
         maxWidth: Int,
+        hyphenate: Boolean = false,
     ): List<String> {
         val paragraphs = text
             .split('\n')
@@ -771,15 +853,22 @@ class RenderedChapterExporter(
             }
 
             val words = paragraph.split(Regex("\\s+")).filter { it.isNotBlank() }
-            var currentLine = words.firstOrNull().orEmpty()
-            words.drop(1).forEach { word ->
-                val candidate = "$currentLine $word"
+            var currentLine = ""
+            for (word in words) {
+                val candidate = if (currentLine.isEmpty()) word else "$currentLine $word"
                 if (paint.measureText(candidate) <= maxWidth) {
                     currentLine = candidate
-                } else {
-                    wrappedLines += currentLine
-                    currentLine = word
+                    continue
                 }
+                if (hyphenate && paint.measureText(word) > maxWidth) {
+                    // Fill the current line with the start of the word, then continue.
+                    val pieces = hyphenateToWidth(word, paint, maxWidth, firstLinePrefix = currentLine)
+                    pieces.dropLast(1).forEach { wrappedLines += it }
+                    currentLine = pieces.last()
+                    continue
+                }
+                if (currentLine.isNotEmpty()) wrappedLines += currentLine
+                currentLine = word
             }
             if (currentLine.isNotBlank()) {
                 wrappedLines += currentLine
@@ -790,6 +879,71 @@ class RenderedChapterExporter(
         }
 
         return if (wrappedLines.isEmpty()) listOf(text.trim()) else wrappedLines
+    }
+
+    /**
+     * Splits a word too wide for [maxWidth] into lines ending in "-", breaking only
+     * between Spanish-style syllables (never leaving a single letter on either side).
+     * The first piece is appended to [firstLinePrefix] when it fits there.
+     */
+    private fun hyphenateToWidth(
+        word: String,
+        paint: TextPaint,
+        maxWidth: Int,
+        firstLinePrefix: String,
+    ): List<String> {
+        val result = mutableListOf<String>()
+        var rest = word
+        var prefix = firstLinePrefix
+        while (paint.measureText(rest) > maxWidth) {
+            val breaks = syllableBreaks(rest)
+            val lead = if (prefix.isEmpty()) "" else "$prefix "
+            val cut = breaks.lastOrNull { paint.measureText(lead + rest.substring(0, it) + "-") <= maxWidth }
+            if (cut == null) {
+                if (prefix.isNotEmpty()) {
+                    result += prefix
+                    prefix = ""
+                    continue
+                }
+                // No syllable break fits: cut by letters as a last resort, still with a hyphen.
+                var end = rest.length - 1
+                while (end > 1 && paint.measureText(rest.substring(0, end) + "-") > maxWidth) end--
+                if (end <= 1) break
+                result += rest.substring(0, end) + "-"
+                rest = rest.substring(end)
+                continue
+            }
+            result += lead + rest.substring(0, cut) + "-"
+            prefix = ""
+            rest = rest.substring(cut)
+        }
+        result += if (prefix.isEmpty()) rest else "$prefix $rest"
+        return result
+    }
+
+    /** Indices where [word] may be split (before that index), Spanish syllable rules. */
+    private fun syllableBreaks(word: String): List<Int> {
+        fun isVowel(c: Char) = c.lowercaseChar() in "aeiouáéíóúü"
+        val inseparable = setOf("bl", "br", "cl", "cr", "dr", "fl", "fr", "gl", "gr", "kl", "kr", "pl", "pr", "tr", "ch", "ll", "rr", "qu")
+        val breaks = mutableListOf<Int>()
+        for (i in 1 until word.length - 1) {
+            val c = word[i]
+            // A consonant followed by a vowel starts a syllable…
+            if (!c.isLetter() || isVowel(c) || !isVowel(word[i + 1])) continue
+            // …together with the consonant before it when the pair can't be split (TR, BL, CH…).
+            val start = if (word[i - 1].isLetter() && !isVowel(word[i - 1]) &&
+                word.substring(i - 1, i + 1).lowercase(Locale.ROOT) in inseparable
+            ) i - 1 else i
+            val head = word.substring(0, start)
+            val tail = word.substring(start)
+            // Never leave a lone letter on either side; both halves need a vowel.
+            if (head.count { it.isLetter() } >= 2 && tail.count { it.isLetter() } >= 2 &&
+                head.any { isVowel(it) } && tail.any { isVowel(it) }
+            ) {
+                breaks += start
+            }
+        }
+        return breaks.distinct().sorted()
     }
 
     private fun balanceText(
@@ -839,8 +993,8 @@ class RenderedChapterExporter(
         pageWidth: Int,
         pageHeight: Int,
     ): List<Pair<Float, Float>> {
-        val stepX = max(max(block.symWidth, basePlacementRect.width() * 0.2f), 8f)
-        val stepY = max(max(block.symHeight, basePlacementRect.height() * 0.2f), 8f)
+        val stepX = max(basePlacementRect.width() * COLLISION_SHIFT_FRACTION, 6f)
+        val stepY = max(basePlacementRect.height() * COLLISION_SHIFT_FRACTION, 6f)
         val directions = listOf(
             0f to -1f,
             0f to 1f,
@@ -956,8 +1110,8 @@ class RenderedChapterExporter(
     }
 
     private fun buildCleanupRect(block: TranslationBlock): RectF {
-        val padX = max(block.symWidth * 0.5f, PRECISE_MASK_PADDING_PX.toFloat())
-        val padY = max(block.symHeight * 0.35f, PRECISE_MASK_PADDING_PX.toFloat())
+        val padX = max(block.symWidth * 0.6f, PRECISE_MASK_PADDING_PX.toFloat())
+        val padY = max(block.symHeight * 0.5f, PRECISE_MASK_PADDING_PX.toFloat())
         return RectF(
             max(block.x - padX, 0f),
             max(block.y - padY, 0f),
@@ -1107,7 +1261,8 @@ class RenderedChapterExporter(
         } else {
             tintColor(cleanupColor, -18)
         }
-        val textBackgroundColor = withAlpha(backgroundBase, if (isLightBackground) 235 else 215)
+        // Opaque: a see-through box let leftover letters show behind the translation.
+        val textBackgroundColor = withAlpha(backgroundBase, 255)
 
         return RegionRenderStyle(
             isLightBackground = isLightBackground,
@@ -1335,6 +1490,10 @@ class RenderedChapterExporter(
         val textY: Float,
         val occupiedTextRect: RectF,
         val style: RegionRenderStyle,
+        /** False for erase-only bubbles (their words were moved to a neighbour). */
+        val hasText: Boolean = true,
+        /** Original letter height, used to size the erase mask. */
+        val glyphHeight: Float = 0f,
     )
 
     private data class ExportMetadata(

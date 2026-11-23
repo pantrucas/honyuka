@@ -467,7 +467,8 @@ class HonyukaViewModel(
         }
     }
 
-    fun translateChapter(chapter: ChapterEntry) {
+    /** @param fromScratch redo OCR and translation; the old result is kept as `.json.bak`. */
+    fun translateChapter(chapter: ChapterEntry, fromScratch: Boolean = false) {
         val currentState = state.value
         if (AutoTranslateWorker.running.value) {
             val message = "Auto-translate is running in the background. Try again when it finishes."
@@ -518,6 +519,7 @@ class HonyukaViewModel(
             localBackend = currentState.localBackend,
             googleFallback = currentState.googleFallback,
             confirmed = false,
+            fromScratch = fromScratch,
         )
         ContextCompat.startForegroundService(appContext, intent)
     }

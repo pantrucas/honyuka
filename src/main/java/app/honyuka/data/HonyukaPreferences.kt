@@ -78,6 +78,15 @@ class HonyukaPreferences(context: Context) {
                 return GeminiModelPreset.DEFAULT.modelName
             }
         }
+        // v0.4: Flash reads the page images far better than Flash-Lite. Move users who were
+        // on the old Flash-Lite default once; Flash-Lite is still used when Flash's quota runs out.
+        if (!prefs.getBoolean(KEY_MODEL_FLASH_MIGRATED, false)) {
+            prefs.edit().putBoolean(KEY_MODEL_FLASH_MIGRATED, true).apply()
+            if (saved == null || saved == GeminiModelPreset.FLASH_LITE_LATEST.modelName) {
+                saveGeminiModelName(GeminiModelPreset.DEFAULT.modelName)
+                return GeminiModelPreset.DEFAULT.modelName
+            }
+        }
         return saved?.takeIf { it.isNotBlank() } ?: GeminiModelPreset.DEFAULT.modelName
     }
 
@@ -230,6 +239,7 @@ class HonyukaPreferences(context: Context) {
         const val KEY_GEMINI_API_KEY = "gemini_api_key"
         const val KEY_GEMINI_MODEL_LIST = "gemini_model_list"
         const val KEY_MODEL_PRESETS_MIGRATED = "model_presets_migrated_v2"
+        const val KEY_MODEL_FLASH_MIGRATED = "model_flash_default_v4"
         const val KEY_LOCAL_MODEL = "local_model"
         const val KEY_LOCAL_BACKEND = "local_backend"
         const val KEY_THEME_MODE = "theme_mode"

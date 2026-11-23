@@ -136,6 +136,8 @@ class TranslationPipeline(
         localModel: LocalModel = LocalModel.DEFAULT,
         localBackend: LocalBackend = LocalBackend.AUTO,
         googleFallback: Boolean = false,
+        pageImage: ((pageName: String) -> ByteArray?)? = null,
+        glossary: MutableMap<String, String> = mutableMapOf(),
         onChunkSaved: (done: Int, total: Int) -> Unit = { _, _ -> },
         onProgress: (title: String, detail: String, progress: Float) -> Unit,
     ): String? {
@@ -152,6 +154,8 @@ class TranslationPipeline(
                 deepLApiKey = deepLApiKey,
                 localModel = localModel,
                 localBackend = localBackend,
+                pageImage = pageImage,
+                glossary = glossary,
                 onChunkDone = { done, total ->
                     onChunkSaved(done, total)
                     onProgress(
@@ -197,7 +201,19 @@ class TranslationPipeline(
         sourceLanguage: SourceLanguage,
         targetLanguage: TargetLanguage,
         geminiModelName: String,
+        withImages: Boolean = true,
     ): Pair<Int, Int> {
+        if (withImages) {
+            return GeminiVisionEngine(
+                sourceLanguage = sourceLanguage,
+                targetLanguage = targetLanguage,
+                apiKey = "",
+                modelName = geminiModelName,
+                pageImage = { null },
+                glossary = mutableMapOf(),
+                onBatchDone = { _, _ -> },
+            ).plan(pages)
+        }
         return GeminiTranslationEngine(
             cacheDir = context.cacheDir,
             sourceLanguage = sourceLanguage,
@@ -205,6 +221,15 @@ class TranslationPipeline(
             apiKey = "",
             modelName = geminiModelName,
         ).plan(pages)
+    }
+
+    /**
+     * Raw bytes of every page, looked up by the same trimmed leaf name used as the
+     * key in [PageTranslation] maps. Used to show Gemini the page it is translating.
+     */
+    fun pageImageLoader(chapter: ChapterEntry, chapterDocument: DocumentFile): (String) -> ByteArray? {
+        val pages = loadPages(chapter, chapterDocument).associateBy { it.name }
+        return { name -> pages[name]?.let { page -> runCatching { page.openStream().use { it.readBytes() } }.getOrNull() } }
     }
 
     private fun loadPages(
@@ -483,10 +508,26 @@ private fun createTranslationEngine(
     deepLApiKey: String,
     localModel: LocalModel,
     localBackend: LocalBackend,
+    pageImage: ((pageName: String) -> ByteArray?)?,
+    glossary: MutableMap<String, String>,
     onChunkDone: (done: Int, total: Int) -> Unit,
 ): TextTranslationEngine {
     return when (engine) {
-        TranslationEngine.GEMINI -> GeminiTranslationEngine(
+        TranslationEngine.GEMINI -> if (pageImage != null) {
+            val vision = GeminiVisionEngine(
+                sourceLanguage = sourceLanguage,
+                targetLanguage = targetLanguage,
+                apiKey = geminiApiKey,
+                modelName = geminiModelName,
+                pageImage = pageImage,
+                glossary = glossary,
+                onBatchDone = onChunkDone,
+            )
+            object : TextTranslationEngine {
+                override fun translate(pages: MutableMap<String, PageTranslation>) = vision.translate(pages)
+                override fun close() = Unit
+            }
+        } else GeminiTranslationEngine(
             cacheDir = context.cacheDir,
             sourceLanguage = sourceLanguage,
             targetLanguage = targetLanguage,
@@ -959,7 +1000,8 @@ private abstract class LlmBatchTranslationEngine(
     }
 
     private fun memoryKey(text: String): String {
-        return "$memoryModelKey|${sourceLanguage.languageTag}>${targetLanguage.languageTag}|${normaliseForCache(text)}"
+        // Bump PROMPT_VERSION whenever the prompt changes so old (worse) translations aren't reused.
+        return "$PROMPT_VERSION|$memoryModelKey|${sourceLanguage.languageTag}>${targetLanguage.languageTag}|${normaliseForCache(text)}"
     }
 
     protected open fun systemPrompt(): String = translationSystemPrompt(sourceLanguage, targetLanguage)
@@ -969,6 +1011,7 @@ private abstract class LlmBatchTranslationEngine(
     private companion object {
         /** Per-entry framing overhead: `[id,""]` ≈ 8 tokens */
         const val ENTRY_OVERHEAD_TOKENS = 8
+        const val PROMPT_VERSION = "v2"
         val WHITESPACE_REGEX = Regex("\\s+")
     }
 }
@@ -983,13 +1026,17 @@ private fun translationSystemPrompt(source: SourceLanguage, target: TargetLangua
     } else {
         "[[0,\"Hey, wait!\"],[1,\"Run!\"]]"
     }
-    return "You are a manga translator. Translate ${source.label} dialogue to concise natural ${target.label}.\n" +
+    return "You are a manga translator. Translate ${source.label} dialogue to concise natural " +
+        "${GeminiVisionEngine.targetDescription(target)}.\n" +
         "Input/output format: [[id,\"text\"],...]\n" +
         "Example:\n" +
         "Input: [[0,\"おい待て\"],[1,\"逃げろ！\"]]\n" +
         "Output: $exampleOutput\n" +
         "Rules: Preserve IDs. Translate ALL text to ${target.label}. Keep it short for speech bubbles. " +
-        "Preserve names and honorifics. Watermarks/URLs → RTMTH. Return JSON array only."
+        "Lines are in reading order; a sentence may continue on the next line, so translate with that context. " +
+        "Never invent words or sayings; for idioms use a real equivalent or say the meaning plainly. " +
+        "Write in UPPERCASE with correct spelling and accents. " +
+        "Preserve names, nicknames and honorifics. Watermarks/URLs → RTMTH. Return JSON array only."
 }
 
 /** Parses `[[id,"text"],…]` model output (ids may be numbers or strings). */
@@ -1107,70 +1154,11 @@ private class GeminiTranslationEngine(
      * - a 400 about thinking settings: retried with the next weaker thinking config
      */
     override fun complete(systemPrompt: String, userText: String): String {
-        val url = "https://generativelanguage.googleapis.com/v1beta/models/${modelName.trim()}:generateContent"
-        val headers = mapOf("x-goog-api-key" to apiKey.trim())
-
-        var attempt = 0
-        var networkRetries = 0
-        while (true) {
-            val thinking = GeminiThinking.configFor(modelName)
-            try {
-                val response = httpPostJson(
-                    url = url,
-                    body = buildGeminiPayload(systemPrompt, userText, modelName, thinking).toString(),
-                    headers = headers,
-                )
-
-                val root = JSONObject(response)
-                root.optJSONObject("error")?.let { error ->
-                    throw GeminiApiException(
-                        statusCode = error.optInt("code", 0),
-                        retryable = false,
-                        message = formatGeminiErrorMessage(
-                            errorBody = error,
-                            fallbackMessage = error.optString("message", response),
-                            modelName = modelName,
-                        ),
-                    )
-                }
-
-                val candidate = root.getJSONArray("candidates").getJSONObject(0)
-                if (candidate.optString("finishReason", "") == "MAX_TOKENS") {
-                    error("Gemini response truncated (MAX_TOKENS). Chunk too large.")
-                }
-                return candidate.responseText()
-            } catch (e: HttpException) {
-                if (e.statusCode == 400 && thinking != null && e.responseBody.contains("thinking", ignoreCase = true)) {
-                    GeminiThinking.markRejected(modelName)
-                    continue
-                }
-                val geminiError = e.toGeminiApiException(modelName)
-                val retryable = geminiError?.retryable ?: (e.statusCode in RETRYABLE_STATUS_CODES)
-                if (!retryable || ++attempt >= MAX_API_RETRIES) {
-                    throw geminiError ?: e
-                }
-                val serverDelayMs = e.retryDelaySeconds()?.let { it * 1_000L }
-                val backoffMs = BASE_BACKOFF_MS * (1L shl (attempt - 1).coerceAtMost(4))
-                Thread.sleep((serverDelayMs ?: backoffMs).coerceIn(1_000L, MAX_RETRY_WAIT_MS))
-            } catch (e: IOException) {
-                if (networkRetries++ >= 1) throw e
-                Thread.sleep(BASE_BACKOFF_MS)
-            }
+        return geminiGenerate(apiKey, modelName) { thinking ->
+            buildGeminiPayload(systemPrompt, userText, modelName, thinking)
         }
     }
 
-    private companion object {
-        /** Maximum attempts for a single Gemini API call on 429/503 errors. */
-        const val MAX_API_RETRIES = 5
-
-        /** Initial backoff delay when the server gives no RetryInfo. */
-        const val BASE_BACKOFF_MS = 2_000L
-
-        /** Upper bound on a single wait before retrying. */
-        const val MAX_RETRY_WAIT_MS = 60_000L
-
-        val RETRYABLE_STATUS_CODES = setOf(429, 503)
-    }
 }
 
 /** The on-device model failed to load or run; splitting the chunk won't help. */
@@ -1347,6 +1335,84 @@ private object GeminiTranslationMemory {
         }
     }
 }
+
+/** Maximum attempts for a single Gemini API call on 429/503 errors. */
+private const val GEMINI_MAX_API_RETRIES = 5
+
+/** Initial backoff delay when the server gives no RetryInfo. */
+private const val GEMINI_BASE_BACKOFF_MS = 2_000L
+
+/** Upper bound on a single wait before retrying. */
+private const val GEMINI_MAX_RETRY_WAIT_MS = 60_000L
+
+private val GEMINI_RETRYABLE_STATUS_CODES = setOf(429, 503)
+
+/**
+ * One generateContent call with retries:
+ * - 429/503: waits as long as the server asks (RetryInfo), else exponential backoff
+ * - network errors: retried once
+ * - a 400 about thinking settings: retried with the next weaker thinking config
+ */
+internal fun geminiGenerate(apiKey: String, modelName: String, payloadFor: (thinking: JSONObject?) -> JSONObject): String {
+    val url = "https://generativelanguage.googleapis.com/v1beta/models/${modelName.trim()}:generateContent"
+    val headers = mapOf("x-goog-api-key" to apiKey.trim())
+
+    var attempt = 0
+    var networkRetries = 0
+    while (true) {
+        val thinking = GeminiThinking.configFor(modelName)
+        try {
+            val response = httpPostJson(
+                url = url,
+                body = payloadFor(thinking).toString(),
+                headers = headers,
+            )
+
+            val root = JSONObject(response)
+            root.optJSONObject("error")?.let { error ->
+                throw GeminiApiException(
+                    statusCode = error.optInt("code", 0),
+                    retryable = false,
+                    message = formatGeminiErrorMessage(
+                        errorBody = error,
+                        fallbackMessage = error.optString("message", response),
+                        modelName = modelName,
+                    ),
+                )
+            }
+
+            val candidate = root.getJSONArray("candidates").getJSONObject(0)
+            if (candidate.optString("finishReason", "") == "MAX_TOKENS") {
+                error("Gemini response truncated (MAX_TOKENS). Chunk too large.")
+            }
+            return candidate.responseText()
+        } catch (e: HttpException) {
+            if (e.statusCode == 400 && thinking != null && e.responseBody.contains("thinking", ignoreCase = true)) {
+                GeminiThinking.markRejected(modelName)
+                continue
+            }
+            val geminiError = e.toGeminiApiException(modelName)
+            val retryable = geminiError?.retryable ?: (e.statusCode in GEMINI_RETRYABLE_STATUS_CODES)
+            if (!retryable || ++attempt >= GEMINI_MAX_API_RETRIES) {
+                throw geminiError ?: e
+            }
+            val serverDelayMs = e.retryDelaySeconds()?.let { it * 1_000L }
+            val backoffMs = GEMINI_BASE_BACKOFF_MS * (1L shl (attempt - 1).coerceAtMost(4))
+            Thread.sleep((serverDelayMs ?: backoffMs).coerceIn(1_000L, GEMINI_MAX_RETRY_WAIT_MS))
+        } catch (e: IOException) {
+            if (networkRetries++ >= 1) throw e
+            Thread.sleep(GEMINI_BASE_BACKOFF_MS)
+        }
+    }
+}
+
+/** True when Gemini refused because the model's quota is used up (worth switching model). */
+internal fun isGeminiQuotaExhausted(error: Exception): Boolean {
+    val api = error as? GeminiApiException ?: (error.cause as? GeminiApiException) ?: return false
+    return api.statusCode == 429
+}
+
+internal fun geminiSafetySettings(): JSONArray = safetySettings()
 
 /**
  * Picks the cheapest thinking setting each model accepts. Thinking tokens are

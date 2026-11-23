@@ -72,6 +72,7 @@ class TranslationService : Service() {
             ?: LocalBackend.AUTO
         val googleFallback = intent.getBooleanExtra(EXTRA_GOOGLE_FALLBACK, false)
         val rerenderOnly = intent.getBooleanExtra(EXTRA_RERENDER_ONLY, false)
+        val fromScratch = intent.getBooleanExtra(EXTRA_FROM_SCRATCH, false)
         val isConfirmed = intent.getBooleanExtra(EXTRA_CONFIRMED, false)
 
         startForeground(NOTIFICATION_ID, buildNotification(
@@ -93,7 +94,7 @@ class TranslationService : Service() {
         translationJob = scope.launch {
             runTranslation(
                 chapter, sourceLang, targetLang, engine, geminiApiKey, geminiModelName, deepLApiKey,
-                localModel, localBackend, googleFallback, rerenderOnly, isConfirmed,
+                localModel, localBackend, googleFallback, rerenderOnly, isConfirmed, fromScratch,
             )
         }
 
@@ -113,6 +114,7 @@ class TranslationService : Service() {
         googleFallback: Boolean,
         rerenderOnly: Boolean,
         isConfirmed: Boolean,
+        fromScratch: Boolean = false,
     ) {
         val settings = TranslationSettings(
             sourceLanguage = sourceLanguage,
@@ -130,6 +132,7 @@ class TranslationService : Service() {
                 chapter = chapter,
                 settings = settings,
                 rerenderOnly = rerenderOnly,
+                fromScratch = fromScratch,
                 requireConfirmation = !isConfirmed,
                 onChunkSaved = { done, total ->
                     runStatus.update { status ->
@@ -320,6 +323,7 @@ class TranslationService : Service() {
         private const val EXTRA_GOOGLE_FALLBACK = "google_fallback"
         private const val EXTRA_RERENDER_ONLY = "rerender_only"
         private const val EXTRA_CONFIRMED = "confirmed"
+        private const val EXTRA_FROM_SCRATCH = "from_scratch"
 
         fun buildIntent(
             context: Context,
@@ -334,6 +338,7 @@ class TranslationService : Service() {
             localBackend: LocalBackend = LocalBackend.AUTO,
             googleFallback: Boolean = false,
             confirmed: Boolean = false,
+            fromScratch: Boolean = false,
         ): Intent {
             return Intent(context, TranslationService::class.java).apply {
                 putExtra(EXTRA_SOURCE_NAME, chapter.sourceName)
@@ -354,6 +359,7 @@ class TranslationService : Service() {
                 putExtra(EXTRA_LOCAL_BACKEND, localBackend.name)
                 putExtra(EXTRA_GOOGLE_FALLBACK, googleFallback)
                 putExtra(EXTRA_CONFIRMED, confirmed)
+                putExtra(EXTRA_FROM_SCRATCH, fromScratch)
             }
         }
 

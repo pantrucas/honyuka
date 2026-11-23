@@ -74,12 +74,12 @@ enum class GeminiModelPreset(
     FLASH_LITE_LATEST(
         label = "Flash-Lite (latest)",
         modelName = "gemini-flash-lite-latest",
-        description = "Cheapest, largest free daily quota — recommended for manga dialogue",
+        description = "Cheapest, largest free daily quota — used automatically when Flash runs out",
     ),
     FLASH_LATEST(
         label = "Flash (latest)",
         modelName = "gemini-flash-latest",
-        description = "Better nuance, smaller free quota",
+        description = "Recommended: sees each page, natural dialogue; falls back to Flash-Lite on quota",
     ),
     PRO_LATEST(
         label = "Pro (latest)",
@@ -89,7 +89,10 @@ enum class GeminiModelPreset(
     ;
 
     companion object {
-        val DEFAULT = FLASH_LITE_LATEST
+        val DEFAULT = FLASH_LATEST
+
+        /** Used automatically when [DEFAULT]'s daily quota runs out. */
+        val QUOTA_FALLBACK = FLASH_LITE_LATEST
 
         /** Hard-coded model names shipped by older builds; migrated to [DEFAULT]. */
         val RETIRED_MODEL_NAMES = setOf(
@@ -255,10 +258,25 @@ data class TranslationBlock(
     var symHeight: Float,
     var symWidth: Float,
     val angle: Float,
+    /**
+     * How the renderer treats this bubble: "" = erase and draw [translation];
+     * [MODE_KEEP] = leave the original art untouched (sound effects, names);
+     * [MODE_ERASE] = erase only (its words were moved into a neighbouring bubble).
+     */
+    var mode: String = "",
 ) {
     /**
      * True when this bubble still needs a translation. A "translation" that is just
-     * the original text (left by older builds when a translator failed) counts as missing.
+     * the original text (left by older builds when a translator failed) counts as missing,
+     * unless the translator deliberately kept it.
      */
-    fun needsTranslation(): Boolean = translation.isBlank() || translation.trim() == text.trim()
+    fun needsTranslation(): Boolean {
+        if (mode == MODE_KEEP || mode == MODE_ERASE) return false
+        return translation.isBlank() || translation.trim() == text.trim()
+    }
+
+    companion object {
+        const val MODE_KEEP = "keep"
+        const val MODE_ERASE = "erase"
+    }
 }
