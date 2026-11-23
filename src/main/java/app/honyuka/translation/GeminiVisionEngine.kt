@@ -195,6 +195,14 @@ internal class GeminiVisionEngine(
                     }
                     else -> {
                         if (text.isBlank()) continue
+                        // Same words in both languages (NO..., names like HOMARE...): leave the
+                        // original lettering instead of flagging it as "still untranslated".
+                        if (text.trim().equals(block.text.trim(), ignoreCase = true)) {
+                            block.mode = TranslationBlock.MODE_KEEP
+                            block.translation = block.text
+                            resolved++
+                            continue
+                        }
                         block.mode = ""
                         block.translation = text.trim()
                         remember(block.text, block.translation)
