@@ -52,6 +52,7 @@ class HonyukaViewModel(
             rootSummary = storage.rootSummary(),
             hasCompatibleRoot = storage.hasCompatibleRoot(),
             sourceLanguage = preferences.sourceLanguage(),
+            sourceLanguages = preferences.sourceLanguages(),
             targetLanguage = preferences.targetLanguage(),
             translationEngine = preferences.translationEngine(),
             geminiModelName = preferences.geminiModelName(),
@@ -244,12 +245,21 @@ class HonyukaViewModel(
         refresh()
     }
 
-    fun onSourceLanguageSelected(language: SourceLanguage) {
-        val changed = language != state.value.sourceLanguage
-        preferences.saveSourceLanguage(language)
-        _state.update { it.copy(sourceLanguage = language) }
-        if (changed && state.value.filterSourcesByLanguage) refresh()
+    /** Toggles a "From" language on/off; at least one always stays selected. */
+    fun onSourceLanguageToggled(language: SourceLanguage) {
+        val current = state.value.sourceLanguages
+        val updated = if (language in current) current - language else current + language
+        if (updated.isEmpty()) return
+        preferences.saveSourceLanguages(updated)
+        _state.update {
+            it.copy(sourceLanguages = updated, sourceLanguage = preferences.sourceLanguage())
+        }
+        if (state.value.filterSourcesByLanguage) refresh()
     }
+
+    /** Language for this chapter: its source folder tag if selected, else the primary choice. */
+    private fun sourceLanguageFor(chapter: ChapterEntry, state: HonyukaUiState): SourceLanguage =
+        SourceLanguage.forChapter(chapter.sourceName, state.sourceLanguages, state.sourceLanguage)
 
     fun onFilterSourcesByLanguageChanged(enabled: Boolean) {
         preferences.saveFilterSourcesByLanguage(enabled)
@@ -264,7 +274,7 @@ class HonyukaViewModel(
 
     /** Scans downloads, skipping sources in other languages when the filter is on. */
     private fun scanChapters() = storage.scanChapters(
-        onlyLanguage = if (preferences.filterSourcesByLanguage()) preferences.sourceLanguage() else null,
+        onlyLanguages = if (preferences.filterSourcesByLanguage()) preferences.sourceLanguages() else null,
     )
 
     fun onTargetLanguageSelected(language: TargetLanguage) {
@@ -420,7 +430,7 @@ class HonyukaViewModel(
         val intent = TranslationService.buildIntent(
             context = appContext,
             chapter = chapter,
-            sourceLanguage = currentState.sourceLanguage,
+            sourceLanguage = sourceLanguageFor(chapter, currentState),
             targetLanguage = currentState.targetLanguage,
             translationEngine = currentState.translationEngine,
             geminiApiKey = currentState.geminiApiKey,
@@ -445,7 +455,7 @@ class HonyukaViewModel(
         val intent = TranslationService.buildIntent(
             context = appContext,
             chapter = chapter,
-            sourceLanguage = currentState.sourceLanguage,
+            sourceLanguage = sourceLanguageFor(chapter, currentState),
             targetLanguage = currentState.targetLanguage,
             translationEngine = currentState.translationEngine,
             geminiApiKey = currentState.geminiApiKey,

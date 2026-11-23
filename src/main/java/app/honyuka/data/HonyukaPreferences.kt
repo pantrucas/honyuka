@@ -29,6 +29,26 @@ class HonyukaPreferences(context: Context) {
         prefs.edit().putString(KEY_SOURCE_LANGUAGE, language.name).apply()
     }
 
+    /** All selected "From" languages (at least one). Falls back to the old single choice. */
+    fun sourceLanguages(): Set<SourceLanguage> {
+        val saved = prefs.getString(KEY_SOURCE_LANGUAGES, null)
+            ?.split(',')
+            ?.mapNotNull { name -> SourceLanguage.entries.firstOrNull { it.name == name.trim() } }
+            ?.toSet()
+            .orEmpty()
+        return saved.ifEmpty { setOf(sourceLanguage()) }
+    }
+
+    /** Saves the set; the primary (used for untagged sources) is the first one in list order. */
+    fun saveSourceLanguages(languages: Set<SourceLanguage>) {
+        if (languages.isEmpty()) return
+        val ordered = SourceLanguage.entries.filter { it in languages }
+        prefs.edit()
+            .putString(KEY_SOURCE_LANGUAGES, ordered.joinToString(",") { it.name })
+            .putString(KEY_SOURCE_LANGUAGE, ordered.first().name)
+            .apply()
+    }
+
     fun targetLanguage(): TargetLanguage {
         val saved = prefs.getString(KEY_TARGET_LANGUAGE, TargetLanguage.ENGLISH.name)
         return TargetLanguage.entries.firstOrNull { it.name == saved } ?: TargetLanguage.ENGLISH
@@ -135,6 +155,7 @@ class HonyukaPreferences(context: Context) {
     private companion object {
         const val KEY_ROOT_URI = "root_uri"
         const val KEY_SOURCE_LANGUAGE = "source_language"
+        const val KEY_SOURCE_LANGUAGES = "source_languages"
         const val KEY_TARGET_LANGUAGE = "target_language"
         const val KEY_TRANSLATION_ENGINE = "translation_engine"
         const val KEY_GEMINI_MODEL_NAME = "gemini_model_name"

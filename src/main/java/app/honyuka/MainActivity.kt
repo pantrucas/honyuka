@@ -398,14 +398,16 @@ private fun SettingsScreen(
 
         item {
             SettingsSection("Languages", "ことば") {
-                Text("From", style = MaterialTheme.typography.labelLarge, color = c.textSoft)
+                Text("From (one or more)", style = MaterialTheme.typography.labelLarge, color = c.textSoft)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     SourceLanguage.entries.forEach { option ->
-                        KawaiiChip(option.label, selected = option == state.sourceLanguage, onClick = { viewModel.onSourceLanguageSelected(option) })
+                        KawaiiChip(option.label, selected = option in state.sourceLanguages, onClick = { viewModel.onSourceLanguageToggled(option) })
                     }
                 }
                 SelectableRow(
-                    title = "Only show ${state.sourceLanguage.label} sources",
+                    title = "Only show " +
+                        SourceLanguage.entries.filter { it in state.sourceLanguages }.joinToString(" / ") { it.label } +
+                        " sources",
                     subtitle = "Skips Mihon sources tagged with another language, e.g. (ES). " +
                         "Sources without a tag are always shown. Makes scanning much faster.",
                     selected = state.filterSourcesByLanguage,

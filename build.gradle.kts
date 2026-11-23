@@ -14,8 +14,8 @@ android {
         applicationId = "app.honyuka.turbo"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.2.0-turbo"
+        versionCode = 4
+        versionName = "0.2.1-turbo"
 
         // LiteRT-LM ships arm64 native code only; keeps the APK small.
         ndk {

@@ -11,6 +11,7 @@
 > - **Avisos honestos:** si quedan globos sin traducir, la app termina con «Completed with warnings» y dice cuántos quedaron, en vez de decir «Completado».
 > - **Plan B opcional:** si Gemini falla (cuota llena, clave mala), puede terminar el capítulo con Google Translate y avisar que lo hizo.
 > - **Nombre propio:** se instala como *Honyuka Turbo* (`app.honyuka.turbo`), al lado del Honyuka original.
+> - **Varios idiomas de origen:** puedes marcar más de un idioma en «From»; cada capítulo usa el idioma de su fuente (EN, JA, KO, ZH).
 > - **Compilación automática:** GitHub Actions compila el APK en cada cambio y lo publica en el release `latest`.
 
 Honyuka (ほにゅか, a playful mispronunciation of *honyakuya*, "translator") is an Android app that translates the manga chapters you've downloaded in [Mihon](https://mihon.app/) and puts the translated chapter back into Mihon's **Local source**, ready to read.

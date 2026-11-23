@@ -40,11 +40,11 @@ class HonyukaStorage(
      * provider round-trip per child per call — that made a 167-chapter folder take
      * tens of minutes.
      *
-     * @param onlyLanguage when set, source folders tagged with another language
+     * @param onlyLanguages when set, source folders tagged with a language outside this set
      * (Mihon names them `Source (EN)`, `Source (ES)`…) are skipped entirely.
      * Folders without a language tag are always included.
      */
-    fun scanChapters(onlyLanguage: SourceLanguage? = null): List<ChapterEntry> {
+    fun scanChapters(onlyLanguages: Set<SourceLanguage>? = null): List<ChapterEntry> {
         val treeUri = preferences.rootUri() ?: return emptyList()
         val rootChildren = listChildren(treeUri, DocumentsContract.getTreeDocumentId(treeUri))
         val downloadsDir = rootChildren.firstOrNull { it.name == DOWNLOADS_DIR && it.isDirectory }
@@ -56,14 +56,14 @@ class HonyukaStorage(
             .orEmpty()
             .associateBy { it.name }
 
-        val wantedLanguage = onlyLanguage?.folderTag()
+        val wantedTags = onlyLanguages?.takeIf { it.isNotEmpty() }?.map { it.folderTag }?.toSet()
         val startedAt = System.currentTimeMillis()
 
         val chapters = listChildren(treeUri, downloadsDir.documentId)
             .filter { it.isDirectory && it.name.isNotBlank() && !it.name.startsWith(".") }
             .filter { sourceDir ->
                 val tag = sourceLanguageTag(sourceDir.name)
-                wantedLanguage == null || tag == null || tag == wantedLanguage
+                wantedTags == null || tag == null || tag in wantedTags
             }
             .sortedByNaturalName()
             .flatMap { sourceDir ->
@@ -337,9 +337,6 @@ class HonyukaStorage(
         val tag = SOURCE_LANGUAGE_REGEX.find(sourceFolderName)?.groupValues?.getOrNull(1) ?: return null
         return tag.lowercase(Locale.ROOT).takeUnless { it == "all" }
     }
-
-    private fun SourceLanguage.folderTag(): String =
-        languageTag.substringBefore('-').lowercase(Locale.ROOT)
 
     private fun isImageName(name: String?): Boolean {
         val lowered = name?.lowercase(Locale.ROOT) ?: return false

@@ -13,6 +13,25 @@ enum class SourceLanguage(
     JAPANESE("Japanese", TranslateLanguage.JAPANESE, "ja"),
     KOREAN("Korean", TranslateLanguage.KOREAN, "ko"),
     ENGLISH("English", TranslateLanguage.ENGLISH, "en"),
+    ;
+
+    /** Two-letter tag Mihon uses in source folder names, e.g. `en` for `MangaDex (EN)`. */
+    val folderTag: String get() = languageTag.substringBefore('-').lowercase(java.util.Locale.ROOT)
+
+    companion object {
+        private val SOURCE_TAG_REGEX = Regex("""\(([A-Za-z]{2,3})(?:-[A-Za-z0-9]+)?\)\s*$""")
+
+        /** `MangaDex (EN)` → ENGLISH; null when the folder has no tag or an unsupported one. */
+        fun fromSourceFolder(sourceFolderName: String): SourceLanguage? {
+            val tag = SOURCE_TAG_REGEX.find(sourceFolderName)?.groupValues?.getOrNull(1)
+                ?.lowercase(java.util.Locale.ROOT) ?: return null
+            return entries.firstOrNull { it.folderTag == tag }
+        }
+
+        /** Language to OCR/translate a chapter with: the source folder's tag, else the primary choice. */
+        fun forChapter(sourceFolderName: String, selected: Set<SourceLanguage>, primary: SourceLanguage): SourceLanguage =
+            fromSourceFolder(sourceFolderName)?.takeIf { it in selected } ?: primary
+    }
 }
 
 enum class TargetLanguage(
@@ -161,6 +180,7 @@ data class HonyukaUiState(
     val rootSummary: String? = null,
     val hasCompatibleRoot: Boolean = false,
     val sourceLanguage: SourceLanguage = SourceLanguage.JAPANESE,
+    val sourceLanguages: Set<SourceLanguage> = setOf(SourceLanguage.JAPANESE),
     val targetLanguage: TargetLanguage = TargetLanguage.ENGLISH,
     val translationEngine: TranslationEngine = TranslationEngine.GEMINI,
     val geminiModelName: String = GeminiModelPreset.DEFAULT.modelName,
