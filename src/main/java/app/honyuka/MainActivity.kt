@@ -842,7 +842,7 @@ private fun ChapterCard(
             PillButton(
                 text = when {
                     isRunning -> "Working…"
-                    chapter.translated -> "Translate again"
+                    chapter.translated -> "Retry"
                     else -> "Translate"
                 },
                 onClick = onTranslate,
@@ -851,7 +851,7 @@ private fun ChapterCard(
             )
             if (chapter.translated) {
                 PillButton("Re-render", onClick = onRerender, enabled = enabled, style = PillStyle.SOFT, compact = true)
-                PillButton("From scratch", onClick = onFromScratch, enabled = enabled, style = PillStyle.SOFT, compact = true)
+                PillButton("Redo all", onClick = onFromScratch, enabled = enabled, style = PillStyle.SOFT, compact = true)
             }
         }
     }

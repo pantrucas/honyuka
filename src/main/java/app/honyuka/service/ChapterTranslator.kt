@@ -185,7 +185,7 @@ class ChapterTranslator(private val context: Context) {
                 if (untranslated > 0) {
                     warnings += "$untranslated of ${translations.values.sumOf { it.blocks.size }} bubbles are " +
                         "still in the original language. " +
-                        "Tap Translate again to retry only those."
+                        "Tap Retry to redo only those."
                 }
             }
         }

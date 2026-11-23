@@ -40,7 +40,8 @@ internal class GeminiVisionEngine(
     private val glossary: MutableMap<String, String>,
     private val onBatchDone: (done: Int, total: Int) -> Unit,
 ) {
-    private var modelName = modelName.trim()
+    private val originalModel = modelName.trim()
+    private var modelName = originalModel
     private val recentLines = ArrayDeque<Pair<String, String>>()
     private val jpegCache = HashMap<String, String?>()
 
@@ -94,7 +95,7 @@ internal class GeminiVisionEngine(
             if (error is TranslationStoppedException || translated == 0) throw error
             throw IllegalStateException(
                 "Gemini stopped after $translated bubbles: ${error.message} " +
-                    "Progress was saved — translate again later and only the remaining bubbles will be sent.",
+                    "Progress was saved — tap Retry later and only the remaining bubbles will be sent.",
                 error,
             )
         }
@@ -137,7 +138,9 @@ internal class GeminiVisionEngine(
 
         jpegCache.keys.retainAll(batch.map { it.first }.toSet())
         var lastError: Exception? = null
-        for (attempt in 0 until 3) {
+        var busyWaits = 0
+        var attempt = 0
+        while (attempt < 3) {
             val withImages = attempt < 2
             val model = modelName
             val raw = try {
@@ -145,12 +148,21 @@ internal class GeminiVisionEngine(
             } catch (e: Exception) {
                 if (TranslationStop.requested) throw TranslationStoppedException()
                 if (isGeminiQuotaExhausted(e) && modelName != GeminiModelPreset.QUOTA_FALLBACK.modelName) {
-                    Log.w(TAG, "$modelName quota exhausted; switching to ${GeminiModelPreset.QUOTA_FALLBACK.modelName}")
+                    Log.w(TAG, "$modelName busy or out of quota; switching to ${GeminiModelPreset.QUOTA_FALLBACK.modelName}")
                     modelName = GeminiModelPreset.QUOTA_FALLBACK.modelName
+                    continue
+                }
+                if (isGeminiQuotaExhausted(e) && busyWaits < BUSY_WAITS) {
+                    // Both models saturated: high demand is usually over within a minute or two.
+                    busyWaits++
+                    Log.w(TAG, "Gemini busy; waiting before retry $busyWaits/$BUSY_WAITS")
+                    waitUnlessStopped(BUSY_WAIT_MS * busyWaits)
+                    modelName = originalModel
                     continue
                 }
                 throw e
             }
+            attempt++
             val parsed = runCatching { parseResponse(raw) }.getOrElse {
                 Log.w(TAG, "Unreadable Gemini response (attempt $attempt)", it)
                 lastError = it as? Exception ?: IllegalStateException(it)
@@ -348,6 +360,16 @@ Also return "names": proper names, nicknames and recurring terms seen on these p
 
     private fun textPart(text: String) = JSONObject().put("text", text)
 
+    /** Sleeps in short steps so the Stop button still works during long waits. */
+    private fun waitUnlessStopped(ms: Long) {
+        var left = ms
+        while (left > 0) {
+            if (TranslationStop.requested) throw TranslationStoppedException()
+            Thread.sleep(minOf(left, 1_000L))
+            left -= 1_000L
+        }
+    }
+
     companion object {
         private const val TAG = "HonyukaVision"
         private const val MAX_PAGES_PER_REQUEST = 4
@@ -356,6 +378,8 @@ Also return "names": proper names, nicknames and recurring terms seen on these p
         private const val MAX_CONTEXT_LINES = 25
         private const val MAX_GLOSSARY = 120
         private const val INTER_REQUEST_DELAY_MS = 4_000L
+        private const val BUSY_WAITS = 3
+        private const val BUSY_WAIT_MS = 30_000L
 
         /** Style guidance per target language; Spanish is neutral Latin American. */
         fun targetDescription(target: TargetLanguage): String = when (target) {

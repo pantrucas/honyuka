@@ -77,7 +77,7 @@ object TranslationStop {
 }
 
 /** Thrown when the user taps Stop; progress up to the last finished chunk is saved. */
-class TranslationStoppedException : Exception("Stopped. Finished parts are saved — tap Translate again to continue.")
+class TranslationStoppedException : Exception("Stopped. Finished parts are saved — tap Retry to continue.")
 
 class TranslationPipeline(
     private val context: Context,
@@ -1406,10 +1406,15 @@ internal fun geminiGenerate(apiKey: String, modelName: String, payloadFor: (thin
     }
 }
 
-/** True when Gemini refused because the model's quota is used up (worth switching model). */
+/**
+ * True when Gemini refused because the model's quota is used up (429) or the model is
+ * overloaded (503, "high demand") — in both cases another model usually still answers.
+ */
 internal fun isGeminiQuotaExhausted(error: Exception): Boolean {
-    val api = error as? GeminiApiException ?: (error.cause as? GeminiApiException) ?: return false
-    return api.statusCode == 429
+    val api = error as? GeminiApiException ?: (error.cause as? GeminiApiException)
+    val http = error as? HttpException ?: error.cause as? HttpException ?: api?.cause as? HttpException
+    val status = api?.statusCode ?: http?.statusCode ?: return false
+    return status == 429 || status == 503
 }
 
 internal fun geminiSafetySettings(): JSONArray = safetySettings()
