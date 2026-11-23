@@ -44,6 +44,8 @@ internal class GeminiVisionEngine(
     private var modelName = originalModel
     private val recentLines = ArrayDeque<Pair<String, String>>()
     private val jpegCache = HashMap<String, String?>()
+    /** Bubbles given a new translation in this run; checked once more by [proofread]. */
+    private val translatedThisRun = mutableListOf<TranslationBlock>()
 
     /** Number of requests a run will make (without retries). */
     fun plan(pages: Map<String, PageTranslation>): Pair<Int, Int> {
@@ -90,6 +92,8 @@ internal class GeminiVisionEngine(
             }
             onBatchDone(index + 1, batches.size)
         }
+
+        if (failure == null && translatedThisRun.isNotEmpty()) proofread()
 
         failure?.let { error ->
             if (error is TranslationStoppedException || translated == 0) throw error
@@ -173,7 +177,14 @@ internal class GeminiVisionEngine(
             for ((id, result) in parsed.lines) {
                 val block = ids[id] ?: continue
                 val (text, mode) = result
-                when (mode) {
+                // A one-word sound with no vowels (TMP, RMM, KSHK, SHH, HM?) reads the same in any
+                // language and is usually drawn art: never repaint it, whatever the model says.
+                val effectiveMode = if (mode != TranslationBlock.MODE_ERASE && isVowellessSound(block.text)) {
+                    TranslationBlock.MODE_KEEP
+                } else {
+                    mode
+                }
+                when (effectiveMode) {
                     TranslationBlock.MODE_KEEP -> {
                         block.mode = TranslationBlock.MODE_KEEP
                         block.translation = block.text
@@ -187,6 +198,7 @@ internal class GeminiVisionEngine(
                         block.mode = ""
                         block.translation = text.trim()
                         remember(block.text, block.translation)
+                        translatedThisRun += block
                     }
                 }
                 resolved++
@@ -360,6 +372,58 @@ Also return "names": proper names, nicknames and recurring terms seen on these p
 
     private fun textPart(text: String) = JSONObject().put("text", text)
 
+    /**
+     * Final spelling/sense check on the new lines, text only (cheap): fixes typos and
+     * non-existent words the first pass sometimes produces (e.g. "MENIDO" for "TENIDO").
+     * Never fails the run — if Gemini can't answer, the first-pass text stays.
+     */
+    private fun proofread() {
+        translatedThisRun.chunked(PROOFREAD_LINES_PER_REQUEST).forEach { chunk ->
+            if (TranslationStop.requested) return
+            Thread.sleep(INTER_REQUEST_DELAY_MS)
+            val lines = JSONArray()
+            chunk.forEachIndexed { i, block ->
+                lines.put(JSONArray().put("$i").put(block.text.replace('\n', ' ').trim()).put(block.translation))
+            }
+            val fixSchema = JSONObject().put("type", "OBJECT").put(
+                "properties",
+                JSONObject().put("id", JSONObject().put("type", "STRING")).put("text", JSONObject().put("type", "STRING")),
+            ).put("required", JSONArray(listOf("id", "text")))
+            val schema = JSONObject().put("type", "OBJECT")
+                .put("properties", JSONObject().put("fixes", JSONObject().put("type", "ARRAY").put("items", fixSchema)))
+                .put("required", JSONArray(listOf("fixes")))
+            val prompt = """
+You proofread a manga translation into ${targetDescription(targetLanguage)}.
+Each line is [id, original ${sourceLanguage.label} (OCR, may be noisy), translation]. Consecutive lines are consecutive bubbles.
+Return ONLY lines that have a real error: a misspelled or non-existent word (e.g. MENIDO instead of TENIDO), a missing accent or ¿ ¡, a wrong meaning, an invented saying, or words left in the original language. Keep the same length and style, in UPPERCASE. Names and sound effects stay as they are. If nothing is wrong return an empty list.
+""".trim()
+            val raw = runCatching {
+                geminiGenerate(apiKey, modelName) { thinking ->
+                    val config = JSONObject().put("responseMimeType", "application/json").put("responseSchema", schema)
+                    thinking?.let { config.put("thinkingConfig", it) }
+                    JSONObject()
+                        .put("system_instruction", JSONObject().put("parts", JSONArray().put(textPart(prompt))))
+                        .put("contents", JSONArray().put(JSONObject().put("role", "user").put("parts", JSONArray().put(textPart(lines.toString())))))
+                        .put("generationConfig", config)
+                        .put("safetySettings", geminiSafetySettings())
+                }
+            }.onFailure { Log.w(TAG, "Proofreading skipped", it) }.getOrNull() ?: return
+            runCatching {
+                val body = raw.trim().let { it.substring(it.indexOf('{'), it.lastIndexOf('}') + 1) }
+                val fixes = JSONObject(body).optJSONArray("fixes") ?: JSONArray()
+                for (i in 0 until fixes.length()) {
+                    val fix = fixes.optJSONObject(i) ?: continue
+                    val block = chunk.getOrNull(fix.optString("id").trim().toIntOrNull() ?: continue) ?: continue
+                    val text = fix.optString("text").trim()
+                    if (text.isNotEmpty() && text != block.text.trim()) {
+                        Log.i(TAG, "Proofread: ${block.translation} → $text")
+                        block.translation = text
+                    }
+                }
+            }.onFailure { Log.w(TAG, "Unreadable proofreading answer", it) }
+        }
+    }
+
     /** Sleeps in short steps so the Stop button still works during long waits. */
     private fun waitUnlessStopped(ms: Long) {
         var left = ms
@@ -371,6 +435,15 @@ Also return "names": proper names, nicknames and recurring terms seen on these p
     }
 
     companion object {
+        private val SOUND_TOKEN = Regex("""^[A-Za-z]{2,10}[-!?.…]*$""")
+        private val VOWEL = Regex("[AEIOUYaeiouy]") // Y too: WHY, MY, TRY are words
+
+        /** "TMP", "RMM", "BMP-", "HM?": a single short word without vowels. */
+        internal fun isVowellessSound(text: String): Boolean {
+            val t = text.trim()
+            return SOUND_TOKEN.matches(t) && !VOWEL.containsMatchIn(t)
+        }
+
         private const val TAG = "HonyukaVision"
         private const val MAX_PAGES_PER_REQUEST = 4
         private const val MAX_BLOCKS_PER_REQUEST = 70
@@ -378,6 +451,7 @@ Also return "names": proper names, nicknames and recurring terms seen on these p
         private const val MAX_CONTEXT_LINES = 25
         private const val MAX_GLOSSARY = 120
         private const val INTER_REQUEST_DELAY_MS = 4_000L
+        private const val PROOFREAD_LINES_PER_REQUEST = 200
         private const val BUSY_WAITS = 3
         private const val BUSY_WAIT_MS = 30_000L
 
