@@ -41,6 +41,7 @@ internal class GeminiVisionEngine(
     private val onBatchDone: (done: Int, total: Int) -> Unit,
     /** The manga's context sheet (characters, gender, speech, terms); see MangaContext. */
     private val mangaContext: String = "",
+    private val proofreadAfter: Boolean = true,
 ) {
     /** Characters the model described on these pages ("NAME — notes"), to add to the sheet. */
     val learnedCharacters = LinkedHashSet<String>()
@@ -97,7 +98,7 @@ internal class GeminiVisionEngine(
             onBatchDone(index + 1, batches.size)
         }
 
-        if (failure == null && translatedThisRun.isNotEmpty()) proofread()
+        if (proofreadAfter && failure == null && translatedThisRun.isNotEmpty()) proofread()
 
         failure?.let { error ->
             if (error is TranslationStoppedException || translated == 0) throw error
@@ -664,7 +665,7 @@ Compare both images and return ONLY real problems:
   - Mode "tr" with the new text for: ${sourceLanguage.label} words still visible in the translated page, "(NOT TRANSLATED)" boxes, a line placed in the wrong bubble or wrong order, the same words repeated in two boxes, wrong gender for the speaker, misspelled or non-existent words, missing accents or opening ¿ ¡, lowercase text, Spain-only words, wrong meaning.
   - Mode "erase" for a box whose words already appear in another box of the same bubble.
   - Mode "keep" for breathing/crying/effort noises (HUFF, HFF, PANT, GASP, SIGH, SOB, NGH, GRR), drawn sound effects, spells and names on their own that were wrongly translated.
-- "missing": ${sourceLanguage.label} dialogue or narration that is still visible in the TRANSLATED page and has NO box in the list (the OCR missed it). {"page": 1 or 2, "source": the original words, "text": the translation, "x", "y": top-left corner, "w", "h": size — all as % of the page width/height, tightly around those words}.
+- "missing": ${sourceLanguage.label} dialogue or narration that is still visible in the TRANSLATED page and has NO box in the list (the OCR missed it). {"page": the PAGE number, "source": the original words, "text": the translation, "x", "y": top-left corner, "w", "h": size — all as % of the page width/height, tightly around those words}.
 Ignore: sound effects drawn as art, Japanese/Korean/Chinese characters, page numbers, scanlation credits and watermarks, and anything that is already fine. Do not rephrase lines that are correct; do not change style for taste.
 All text in UPPERCASE with correct spelling; every ? and ! needs its opening ¿ ¡; quotes are straight "…". If nothing is wrong, return empty lists.
 """.trim() + contextNote()
@@ -743,7 +744,8 @@ All text in UPPERCASE with correct spelling; every ? and ! needs its opening ¿ 
         private const val PROOFREAD_LINES_PER_REQUEST = 200
         private const val BUSY_WAITS = 5
         private const val BUSY_WAIT_MS = 30_000L
-        private const val REVIEW_PAGES_PER_REQUEST = 2
+        /** Free Gemini Flash allows only ~20 requests a day: 4 pages per look keeps a chapter within it. */
+        private const val REVIEW_PAGES_PER_REQUEST = 4
         private const val MAX_MISSING_PER_PAGE = 6
 
         /** Style guidance per target language; Spanish is neutral Latin American. */

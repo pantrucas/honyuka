@@ -140,6 +140,8 @@ class TranslationPipeline(
         glossary: MutableMap<String, String> = mutableMapOf(),
         mangaContext: String = "",
         learnedCharacters: MutableCollection<String> = mutableListOf(),
+        /** Text-only spelling pass; skipped when the visual review will run anyway (saves quota). */
+        proofread: Boolean = true,
         onChunkSaved: (done: Int, total: Int) -> Unit = { _, _ -> },
         onProgress: (title: String, detail: String, progress: Float) -> Unit,
     ): String? {
@@ -160,6 +162,7 @@ class TranslationPipeline(
                 glossary = glossary,
                 mangaContext = mangaContext,
                 learnedCharacters = learnedCharacters,
+                proofread = proofread,
                 onChunkDone = { done, total ->
                     onChunkSaved(done, total)
                     onProgress(
@@ -530,6 +533,7 @@ private fun createTranslationEngine(
     glossary: MutableMap<String, String>,
     mangaContext: String = "",
     learnedCharacters: MutableCollection<String> = mutableListOf(),
+    proofread: Boolean = true,
     onChunkDone: (done: Int, total: Int) -> Unit,
 ): TextTranslationEngine {
     return when (engine) {
@@ -543,6 +547,7 @@ private fun createTranslationEngine(
                 glossary = glossary,
                 onBatchDone = onChunkDone,
                 mangaContext = mangaContext,
+                proofreadAfter = proofread,
             )
             object : TextTranslationEngine {
                 override fun translate(pages: MutableMap<String, PageTranslation>) {

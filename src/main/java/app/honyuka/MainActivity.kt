@@ -616,7 +616,7 @@ private fun GeminiSettings(state: HonyukaUiState, viewModel: HonyukaViewModel) {
         SelectableRow(
             title = "Review pages after translating",
             subtitle = "Gemini looks at every finished page and fixes leftover English, misplaced lines, " +
-                "wrong gender and typos. Uses about one extra request per 2 pages.",
+                "wrong gender and typos. Uses about one extra request per 4 pages.",
             selected = state.reviewPages,
             onClick = { viewModel.onReviewPagesChanged(!state.reviewPages) },
         )

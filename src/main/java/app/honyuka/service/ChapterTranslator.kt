@@ -177,6 +177,7 @@ class ChapterTranslator(private val context: Context) {
                         glossary = glossary,
                         mangaContext = mangaContext,
                         learnedCharacters = learnedCharacters,
+                        proofread = !preferences.reviewPages(),
                         // Save after every request so a later failure never loses paid-for work.
                         onChunkSaved = { done, total ->
                             if (done > 0) storage.writeTranslation(chapter, mutableTranslations)
