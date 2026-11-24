@@ -36,8 +36,26 @@ object MangaContext {
     fun starterFor(mangaName: String): String = when {
         mangaName.contains("Blue Exorcist", ignoreCase = true) ||
             mangaName.contains("Ao no Exorcist", ignoreCase = true) -> BLUE_EXORCIST
+        mangaName.contains("Yowamushi", ignoreCase = true) -> YOWAMUSHI_PEDAL
         else -> ""
     }
+
+    private val YOWAMUSHI_PEDAL = """
+Notas para traducir Yowamushi Pedal (español latino neutro, ciclismo de ruta):
+- SAKAMICHI ONODA — hombre; otaku tímido y amable, muy educado; ama el anime (LOVE HIME).
+- SHUNSUKE IMAIZUMI — hombre; serio, frío y competitivo.
+- SHOUKICHI NARUKO — hombre; ruidoso y fanfarrón, habla con mucha energía; es pelirrojo y sprinter.
+- MIKI KANZAKI — mujer; mánager del club de Sohoku.
+- KINJOU SHINGO — hombre; capitán de Sohoku, sereno.
+- MAKISHIMA YUUSUKE — hombre; escalador; dice «SHOU» al reír. TOUDOU lo llama MAKI-CHAN.
+- TADOKORO JIN — hombre; sprinter grandote y gritón.
+- TOUDOU JINPACHI — hombre; escalador de Hakone, vanidoso.
+- ARAKITA YASUTOMO — hombre; agresivo; le dice FUKU-CHAN a Fukutomi.
+- FUKUTOMI JUICHI — hombre; capitán de Hakone Gakuen; «SOY FUERTE».
+- MANAMI SANGAKU — hombre; escalador relajado y sonriente.
+- MIDOUSUJI AKIRA — hombre; de Kioto Fushimi, inquietante y burlón.
+Términos: INTER-HIGH se deja; SOHOKU, HAKONE GAKUEN, KYOTO FUSHIMI se dejan; sprinter, escalador (climber), all-rounder → TODOTERRENO; «maillot» se usa tal cual; sufijos -KUN, -SAN, -CHAN, -SENPAI se dejan como en el original.
+""".trim()
 
     private val BLUE_EXORCIST = """
 Notas para traducir Blue Exorcist (español latino neutro):

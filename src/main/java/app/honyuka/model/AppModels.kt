@@ -13,6 +13,7 @@ enum class SourceLanguage(
     JAPANESE("Japanese", TranslateLanguage.JAPANESE, "ja"),
     KOREAN("Korean", TranslateLanguage.KOREAN, "ko"),
     ENGLISH("English", TranslateLanguage.ENGLISH, "en"),
+    PORTUGUESE("Portuguese", TranslateLanguage.PORTUGUESE, "pt-BR"),
     ;
 
     /** Two-letter tag Mihon uses in source folder names, e.g. `en` for `MangaDex (EN)`. */
