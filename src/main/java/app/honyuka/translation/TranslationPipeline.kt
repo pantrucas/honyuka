@@ -1578,7 +1578,7 @@ private fun SourceLanguage.toRecognizerOptions(): TextRecognizerOptionsInterface
         SourceLanguage.CHINESE -> ChineseTextRecognizerOptions.Builder().build()
         SourceLanguage.JAPANESE -> JapaneseTextRecognizerOptions.Builder().build()
         SourceLanguage.KOREAN -> KoreanTextRecognizerOptions.Builder().build()
-        SourceLanguage.ENGLISH, SourceLanguage.PORTUGUESE -> TextRecognizerOptions.DEFAULT_OPTIONS
+        SourceLanguage.ENGLISH, SourceLanguage.PORTUGUESE, SourceLanguage.FRENCH -> TextRecognizerOptions.DEFAULT_OPTIONS
     }
 }
 
@@ -1589,6 +1589,7 @@ private fun SourceLanguage.toDeepLSourceCode(): String {
         SourceLanguage.KOREAN -> "KO"
         SourceLanguage.ENGLISH -> "EN"
         SourceLanguage.PORTUGUESE -> "PT"
+        SourceLanguage.FRENCH -> "FR"
     }
 }
 
