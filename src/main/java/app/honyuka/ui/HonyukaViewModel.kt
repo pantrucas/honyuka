@@ -67,6 +67,7 @@ class HonyukaViewModel(
             deepLApiKey = preferences.deepLApiKey(),
             filterSourcesByLanguage = preferences.filterSourcesByLanguage(),
             googleFallback = preferences.googleFallback(),
+            reviewPages = preferences.reviewPages(),
             autoTranslateMangas = preferences.autoTranslateMangas(),
             autoTranslateEnabled = preferences.autoTranslateEnabled(),
             lastAutoRun = preferences.lastAutoRun(),
@@ -291,6 +292,20 @@ class HonyukaViewModel(
         preferences.saveFilterSourcesByLanguage(enabled)
         _state.update { it.copy(filterSourcesByLanguage = enabled) }
         refresh()
+    }
+
+    fun onReviewPagesChanged(enabled: Boolean) {
+        preferences.saveReviewPages(enabled)
+        _state.update { it.copy(reviewPages = enabled) }
+    }
+
+    /** The manga's context sheet (characters, gender, terms), or a starter one. */
+    suspend fun loadMangaContext(mangaName: String): String =
+        withContext(Dispatchers.IO) { storage.readMangaContext(mangaName) }
+
+    fun saveMangaContext(mangaName: String, text: String) {
+        viewModelScope.launch(Dispatchers.IO) { storage.writeMangaContext(mangaName, text.trim()) }
+        Toast.makeText(appContext, "Manga context saved", Toast.LENGTH_SHORT).show()
     }
 
     fun onGoogleFallbackChanged(enabled: Boolean) {
@@ -564,6 +579,45 @@ class HonyukaViewModel(
                 message = "Translation cancelled. OCR results were saved to disk.",
             )
         }
+    }
+
+    /** Gemini checks the finished pages of an already translated chapter and fixes them. */
+    fun reviewChapter(chapter: ChapterEntry) {
+        val currentState = state.value
+        if (AutoTranslateWorker.running.value) {
+            val message = "Auto-translate is running in the background. Try again when it finishes."
+            Toast.makeText(appContext, message, Toast.LENGTH_LONG).show()
+            _state.update { it.copy(message = message) }
+            return
+        }
+        if (currentState.translationEngine != TranslationEngine.GEMINI || currentState.geminiApiKey.isBlank()) {
+            val message = "Review needs the Gemini translator and its API key (Settings)."
+            Toast.makeText(appContext, message, Toast.LENGTH_LONG).show()
+            _state.update { it.copy(message = message) }
+            return
+        }
+        Toast.makeText(appContext, "Reviewing ${chapter.chapterDisplayName}", Toast.LENGTH_SHORT).show()
+        _state.update {
+            it.copy(
+                isBusy = true,
+                message = null,
+                activeChapterKey = chapter.storageKey,
+                activeJob = ActiveJob("Reviewing", chapter.chapterDisplayName, 0.02f),
+            )
+        }
+        val intent = TranslationService.buildIntent(
+            context = appContext,
+            chapter = chapter,
+            sourceLanguage = sourceLanguageFor(chapter, currentState),
+            targetLanguage = currentState.targetLanguage,
+            translationEngine = currentState.translationEngine,
+            geminiApiKey = currentState.geminiApiKey,
+            geminiModelName = currentState.geminiModelName,
+            deepLApiKey = currentState.deepLApiKey,
+            confirmed = true,
+            reviewOnly = true,
+        )
+        ContextCompat.startForegroundService(appContext, intent)
     }
 
     fun reRenderChapter(chapter: ChapterEntry) {

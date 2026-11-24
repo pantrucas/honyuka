@@ -74,9 +74,10 @@ class TranslationService : Service() {
         val rerenderOnly = intent.getBooleanExtra(EXTRA_RERENDER_ONLY, false)
         val fromScratch = intent.getBooleanExtra(EXTRA_FROM_SCRATCH, false)
         val isConfirmed = intent.getBooleanExtra(EXTRA_CONFIRMED, false)
+        val reviewOnly = intent.getBooleanExtra(EXTRA_REVIEW_ONLY, false)
 
         startForeground(NOTIFICATION_ID, buildNotification(
-            if (rerenderOnly) "Re-rendering…" else "Starting…",
+            when { rerenderOnly -> "Re-rendering…"; reviewOnly -> "Reviewing…"; else -> "Starting…" },
             chapter.chapterDisplayName, 0,
         ))
 
@@ -86,7 +87,7 @@ class TranslationService : Service() {
         runStatus.value = RunStatus(
             chapterKey = chapter.storageKey,
             chapterName = chapter.chapterDisplayName,
-            title = if (rerenderOnly) "Re-rendering" else "Starting",
+            title = when { rerenderOnly -> "Re-rendering"; reviewOnly -> "Reviewing"; else -> "Starting" },
             detail = "Getting ready",
             progress = 0f,
             startedAtMs = System.currentTimeMillis(),
@@ -94,7 +95,7 @@ class TranslationService : Service() {
         translationJob = scope.launch {
             runTranslation(
                 chapter, sourceLang, targetLang, engine, geminiApiKey, geminiModelName, deepLApiKey,
-                localModel, localBackend, googleFallback, rerenderOnly, isConfirmed, fromScratch,
+                localModel, localBackend, googleFallback, rerenderOnly, isConfirmed, fromScratch, reviewOnly,
             )
         }
 
@@ -115,6 +116,7 @@ class TranslationService : Service() {
         rerenderOnly: Boolean,
         isConfirmed: Boolean,
         fromScratch: Boolean = false,
+        reviewOnly: Boolean = false,
     ) {
         val settings = TranslationSettings(
             sourceLanguage = sourceLanguage,
@@ -133,6 +135,7 @@ class TranslationService : Service() {
                 settings = settings,
                 rerenderOnly = rerenderOnly,
                 fromScratch = fromScratch,
+                reviewOnly = reviewOnly,
                 requireConfirmation = !isConfirmed,
                 onChunkSaved = { done, total ->
                     runStatus.update { status ->
@@ -324,6 +327,7 @@ class TranslationService : Service() {
         private const val EXTRA_RERENDER_ONLY = "rerender_only"
         private const val EXTRA_CONFIRMED = "confirmed"
         private const val EXTRA_FROM_SCRATCH = "from_scratch"
+        private const val EXTRA_REVIEW_ONLY = "review_only"
 
         fun buildIntent(
             context: Context,
@@ -339,6 +343,7 @@ class TranslationService : Service() {
             googleFallback: Boolean = false,
             confirmed: Boolean = false,
             fromScratch: Boolean = false,
+            reviewOnly: Boolean = false,
         ): Intent {
             return Intent(context, TranslationService::class.java).apply {
                 putExtra(EXTRA_SOURCE_NAME, chapter.sourceName)
@@ -360,6 +365,7 @@ class TranslationService : Service() {
                 putExtra(EXTRA_GOOGLE_FALLBACK, googleFallback)
                 putExtra(EXTRA_CONFIRMED, confirmed)
                 putExtra(EXTRA_FROM_SCRATCH, fromScratch)
+                putExtra(EXTRA_REVIEW_ONLY, reviewOnly)
             }
         }
 

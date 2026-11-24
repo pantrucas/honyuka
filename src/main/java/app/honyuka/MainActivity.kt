@@ -57,6 +57,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -101,6 +102,7 @@ import app.honyuka.ui.Segmented
 import app.honyuka.ui.SoftProgressBar
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.zip.ZipInputStream
 
@@ -269,6 +271,13 @@ private fun HonyukaApp(
                                 onClick = { viewModel.toggleAutoTranslateManga(manga.sourceName, manga.name) },
                             )
                         }
+                        item(key = "manga-context") {
+                            MangaContextRow(
+                                mangaName = selectedManga!!.name,
+                                load = viewModel::loadMangaContext,
+                                save = viewModel::saveMangaContext,
+                            )
+                        }
                         items(selectedManga!!.chapters, key = { it.storageKey }) { chapter ->
                             ChapterCard(
                                 chapter = chapter,
@@ -277,6 +286,7 @@ private fun HonyukaApp(
                                 onTranslate = { viewModel.translateChapter(chapter) },
                                 onRerender = { viewModel.reRenderChapter(chapter) },
                                 onFromScratch = { viewModel.translateChapter(chapter, fromScratch = true) },
+                                onReview = { viewModel.reviewChapter(chapter) },
                             )
                         }
                     }
@@ -603,6 +613,13 @@ private fun GeminiSettings(state: HonyukaUiState, viewModel: HonyukaViewModel) {
             selected = state.googleFallback,
             onClick = { viewModel.onGoogleFallbackChanged(!state.googleFallback) },
         )
+        SelectableRow(
+            title = "Review pages after translating",
+            subtitle = "Gemini looks at every finished page and fixes leftover English, misplaced lines, " +
+                "wrong gender and typos. Uses about one extra request per 2 pages.",
+            selected = state.reviewPages,
+            onClick = { viewModel.onReviewPagesChanged(!state.reviewPages) },
+        )
     }
 }
 
@@ -817,6 +834,52 @@ private fun MangaCard(
 }
 
 @Composable
+private fun MangaContextRow(
+    mangaName: String,
+    load: suspend (String) -> String,
+    save: (String, String) -> Unit,
+) {
+    val c = Kawaii.colors
+    val scope = rememberCoroutineScope()
+    var editing by remember { mutableStateOf<String?>(null) }
+    SelectableRow(
+        title = "Manga context",
+        subtitle = "Characters, gender, how they talk, names to keep. Gemini reads it on every page.",
+        selected = false,
+        onClick = { scope.launch { editing = load(mangaName) } },
+    )
+    editing?.let { text ->
+        AlertDialog(
+            onDismissRequest = { editing = null },
+            containerColor = c.card,
+            shape = RoundedCornerShape(24.dp),
+            title = { Text("Manga context", color = c.text) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "One line per character: name — man/woman; how they talk. Your notes always win. " +
+                            "New characters are added below the automatic line.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = c.textSoft,
+                    )
+                    OutlinedTextField(
+                        value = text,
+                        onValueChange = { editing = it },
+                        modifier = Modifier.fillMaxWidth().height(360.dp),
+                        textStyle = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            },
+            confirmButton = {
+                PillButton("Save", onClick = { save(mangaName, text); editing = null }, compact = true)
+            },
+            dismissButton = { PillButton("Cancel", onClick = { editing = null }, style = PillStyle.GHOST, compact = true) },
+        )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
 private fun ChapterCard(
     chapter: ChapterEntry,
     enabled: Boolean,
@@ -824,6 +887,7 @@ private fun ChapterCard(
     onTranslate: () -> Unit,
     onRerender: () -> Unit,
     onFromScratch: () -> Unit,
+    onReview: () -> Unit,
 ) {
     val c = Kawaii.colors
     KawaiiCard(contentPadding = PaddingValues(14.dp)) {
@@ -838,7 +902,10 @@ private fun ChapterCard(
             }
             StatusChip(if (chapter.translated) "Translated ✓" else "New", good = chapter.translated)
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
             PillButton(
                 text = when {
                     isRunning -> "Working…"
@@ -852,6 +919,7 @@ private fun ChapterCard(
             if (chapter.translated) {
                 PillButton("Re-render", onClick = onRerender, enabled = enabled, style = PillStyle.SOFT, compact = true)
                 PillButton("Redo all", onClick = onFromScratch, enabled = enabled, style = PillStyle.SOFT, compact = true)
+                PillButton("Review", onClick = onReview, enabled = enabled, style = PillStyle.SOFT, compact = true)
             }
         }
     }

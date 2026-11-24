@@ -74,7 +74,7 @@ enum class GeminiModelPreset(
     FLASH_LITE_LATEST(
         label = "Flash-Lite (latest)",
         modelName = "gemini-flash-lite-latest",
-        description = "Cheapest, largest free daily quota — used automatically when Flash runs out",
+        description = "Cheapest, largest free daily quota",
     ),
     FLASH_LATEST(
         label = "Flash (latest)",
@@ -197,6 +197,7 @@ data class HonyukaUiState(
     val deepLApiKey: String = "",
     val filterSourcesByLanguage: Boolean = true,
     val googleFallback: Boolean = false,
+    val reviewPages: Boolean = true,
     val chapters: List<ChapterEntry> = emptyList(),
     val activeJob: ActiveJob? = null,
     val activeChapterKey: String? = null,

@@ -138,6 +138,8 @@ class TranslationPipeline(
         googleFallback: Boolean = false,
         pageImage: ((pageName: String) -> ByteArray?)? = null,
         glossary: MutableMap<String, String> = mutableMapOf(),
+        mangaContext: String = "",
+        learnedCharacters: MutableCollection<String> = mutableListOf(),
         onChunkSaved: (done: Int, total: Int) -> Unit = { _, _ -> },
         onProgress: (title: String, detail: String, progress: Float) -> Unit,
     ): String? {
@@ -156,6 +158,8 @@ class TranslationPipeline(
                 localBackend = localBackend,
                 pageImage = pageImage,
                 glossary = glossary,
+                mangaContext = mangaContext,
+                learnedCharacters = learnedCharacters,
                 onChunkDone = { done, total ->
                     onChunkSaved(done, total)
                     onProgress(
@@ -179,11 +183,14 @@ class TranslationPipeline(
                 // quality, so keep what Gemini finished and let the user (or auto-translate) retry.
                 val all = pageTranslations.values.sumOf { it.blocks.size }
                 val left = pageTranslations.values.sumOf { page -> page.blocks.count { it.needsTranslation() } }
-                throw IllegalStateException(
+                val reason = if (isGeminiDailyQuotaUsedUp(e)) {
+                    "Gemini's daily quota for $geminiModelName is used up (it resets tomorrow). " +
+                        "${all - left} of $all bubbles are done and saved — tap Retry tomorrow to finish the rest."
+                } else {
                     "Gemini is overloaded right now (very high demand on Google's side). " +
-                        "${all - left} of $all bubbles are done and saved — tap Retry in a while to finish the rest.",
-                    e,
-                )
+                        "${all - left} of $all bubbles are done and saved — tap Retry in a while to finish the rest."
+                }
+                throw IllegalStateException(reason, e)
             }
             if (!googleFallback || translationEngine != TranslationEngine.GEMINI) throw e
             // Gemini failed (quota, key, model…). Whatever it already translated is kept;
@@ -521,6 +528,8 @@ private fun createTranslationEngine(
     localBackend: LocalBackend,
     pageImage: ((pageName: String) -> ByteArray?)?,
     glossary: MutableMap<String, String>,
+    mangaContext: String = "",
+    learnedCharacters: MutableCollection<String> = mutableListOf(),
     onChunkDone: (done: Int, total: Int) -> Unit,
 ): TextTranslationEngine {
     return when (engine) {
@@ -533,9 +542,16 @@ private fun createTranslationEngine(
                 pageImage = pageImage,
                 glossary = glossary,
                 onBatchDone = onChunkDone,
+                mangaContext = mangaContext,
             )
             object : TextTranslationEngine {
-                override fun translate(pages: MutableMap<String, PageTranslation>) = vision.translate(pages)
+                override fun translate(pages: MutableMap<String, PageTranslation>) {
+                    try {
+                        vision.translate(pages)
+                    } finally {
+                        learnedCharacters += vision.learnedCharacters
+                    }
+                }
                 override fun close() = Unit
             }
         } else GeminiTranslationEngine(
@@ -1426,6 +1442,19 @@ internal fun isGeminiQuotaExhausted(error: Exception): Boolean {
     val http = error as? HttpException ?: error.cause as? HttpException ?: api?.cause as? HttpException
     val status = api?.statusCode ?: http?.statusCode ?: return false
     return status == 429 || status == 503
+}
+
+/**
+ * True when Gemini is only temporarily unavailable: overloaded (503) or a per-minute
+ * limit (429) — worth waiting for. A used-up daily quota is not "busy".
+ */
+internal fun isGeminiBusy(error: Exception): Boolean =
+    isGeminiQuotaExhausted(error) && !isGeminiDailyQuotaUsedUp(error)
+
+/** True when the model's daily (or free-tier) quota is used up: only tomorrow or billing helps. */
+internal fun isGeminiDailyQuotaUsedUp(error: Exception): Boolean {
+    val api = error as? GeminiApiException ?: (error.cause as? GeminiApiException) ?: return false
+    return api.statusCode == 429 && !api.retryable
 }
 
 internal fun geminiSafetySettings(): JSONArray = safetySettings()

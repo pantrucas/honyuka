@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.PowerManager
 import app.honyuka.data.HonyukaPreferences
 import app.honyuka.data.HonyukaStorage
+import app.honyuka.data.MangaContext
 import app.honyuka.export.RenderedChapterExporter
 import app.honyuka.model.ChapterEntry
 import app.honyuka.model.LocalBackend
@@ -12,6 +13,7 @@ import app.honyuka.model.PageTranslation
 import app.honyuka.model.SourceLanguage
 import app.honyuka.model.TargetLanguage
 import app.honyuka.model.TranslationEngine
+import app.honyuka.translation.GeminiVisionEngine
 import app.honyuka.translation.TranslationPipeline
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -78,6 +80,8 @@ class ChapterTranslator(private val context: Context) {
         settings: TranslationSettings,
         rerenderOnly: Boolean = false,
         fromScratch: Boolean = false,
+        /** Only run the visual review on the saved translation, then re-render. */
+        reviewOnly: Boolean = false,
         requireConfirmation: Boolean = false,
         failIfNothingTranslated: Boolean = false,
         onChunkSaved: (done: Int, total: Int) -> Unit = { _, _ -> },
@@ -87,7 +91,7 @@ class ChapterTranslator(private val context: Context) {
             storage.resolveOriginalChapterDocument(chapter)
         } ?: error("Unable to open chapter ${chapter.chapterDisplayName}")
 
-        if (fromScratch && !rerenderOnly) {
+        if (fromScratch && !rerenderOnly && !reviewOnly) {
             // Keep the old result as `.json.bak`; the run below then redoes OCR and translation.
             withContext(Dispatchers.IO) { storage.backupTranslation(chapter) }
         }
@@ -97,9 +101,17 @@ class ChapterTranslator(private val context: Context) {
         var untranslated = 0
         val hasValidSidecar = !saved.isNullOrEmpty() && saved.values.any { it.blocks.isNotEmpty() }
 
-        if (rerenderOnly) {
+        if (rerenderOnly || reviewOnly) {
             onProgress("Loading translations", "Reading saved translation data", 0.1f)
             if (!hasValidSidecar) error("No saved translation found for this chapter. Translate it first.")
+            if (reviewOnly) {
+                if (settings.engine != TranslationEngine.GEMINI || settings.geminiApiKey.isBlank()) {
+                    error("Review needs the Gemini translator and its API key.")
+                }
+                @Suppress("UNCHECKED_CAST")
+                reviewPages(chapter, chapterDocument, settings, translations as MutableMap<String, PageTranslation>, onProgress)
+                untranslated = translations.values.sumOf { page -> page.blocks.count { it.needsTranslation() } }
+            }
         } else {
             if (!hasValidSidecar) {
                 translations = pipeline.extractText(
@@ -136,6 +148,8 @@ class ChapterTranslator(private val context: Context) {
                     null
                 }
                 val glossary = storage.readGlossary(chapter.mangaName)
+                val mangaContext = storage.readMangaContext(chapter.mangaName)
+                val learnedCharacters = mutableListOf<String>()
 
                 @Suppress("UNCHECKED_CAST")
                 val mutableTranslations = translations as MutableMap<String, PageTranslation>
@@ -161,6 +175,8 @@ class ChapterTranslator(private val context: Context) {
                         googleFallback = settings.googleFallback,
                         pageImage = pageImage,
                         glossary = glossary,
+                        mangaContext = mangaContext,
+                        learnedCharacters = learnedCharacters,
                         // Save after every request so a later failure never loses paid-for work.
                         onChunkSaved = { done, total ->
                             if (done > 0) storage.writeTranslation(chapter, mutableTranslations)
@@ -170,10 +186,21 @@ class ChapterTranslator(private val context: Context) {
                     )?.let { fallbackNotice -> warnings += fallbackNotice }
                 } finally {
                     wakeLock?.takeIf { it.isHeld }?.release()
-                    if (settings.engine == TranslationEngine.GEMINI) storage.writeGlossary(chapter.mangaName, glossary)
+                    if (settings.engine == TranslationEngine.GEMINI) {
+                        storage.writeGlossary(chapter.mangaName, glossary)
+                        // Saved even with nothing new, so the starter sheet becomes editable.
+                        storage.writeMangaContext(
+                            chapter.mangaName,
+                            MangaContext.mergeCharacters(mangaContext, learnedCharacters),
+                        )
+                    }
                 }
                 onProgress("Saving translation", chapter.chapterDisplayName, 0.95f)
                 storage.writeTranslation(chapter, translations)
+
+                if (settings.engine == TranslationEngine.GEMINI && preferences.reviewPages()) {
+                    reviewPages(chapter, chapterDocument, settings, mutableTranslations, onProgress, pageImage)
+                }
 
                 // Never call a run "complete" while bubbles are still in the original language.
                 untranslated = translations.values.sumOf { page -> page.blocks.count { it.needsTranslation() } }
@@ -203,6 +230,40 @@ class ChapterTranslator(private val context: Context) {
             untranslatedBlocks = untranslated,
             totalBlocks = translations.values.sumOf { it.blocks.size },
         )
+    }
+
+    /**
+     * Gemini looks at every translated page next to the original and fixes leftovers.
+     * Saves the result; never throws for Gemini problems (the translation stays as it was).
+     */
+    private suspend fun reviewPages(
+        chapter: ChapterEntry,
+        chapterDocument: androidx.documentfile.provider.DocumentFile,
+        settings: TranslationSettings,
+        translations: MutableMap<String, PageTranslation>,
+        onProgress: (title: String, detail: String, progress: Float) -> Unit,
+        loadedImages: ((String) -> ByteArray?)? = null,
+    ): Int = withContext(Dispatchers.IO) {
+        val pageImage = loadedImages ?: pipeline.pageImageLoader(chapter, chapterDocument)
+        val engine = GeminiVisionEngine(
+            sourceLanguage = settings.sourceLanguage,
+            targetLanguage = settings.targetLanguage,
+            apiKey = settings.geminiApiKey,
+            modelName = settings.geminiModelName,
+            pageImage = pageImage,
+            glossary = storage.readGlossary(chapter.mangaName),
+            onBatchDone = { _, _ -> },
+            mangaContext = storage.readMangaContext(chapter.mangaName),
+        )
+        val changes = engine.review(
+            pages = translations,
+            rendered = { name, page -> pageImage(name)?.let { exporter.previewPage(it, name, page) } },
+            onProgress = { done, total ->
+                onProgress("Reviewing pages", "${chapter.chapterDisplayName}: part $done of $total", 0.95f)
+            },
+        )
+        if (changes > 0) storage.writeTranslation(chapter, translations)
+        changes
     }
 
     private companion object {

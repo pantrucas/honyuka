@@ -127,6 +127,13 @@ class HonyukaPreferences(context: Context) {
     /** When Gemini fails (quota, key…), finish the remaining lines with Google Translate. */
     fun googleFallback(): Boolean = prefs.getBoolean(KEY_GOOGLE_FALLBACK, false)
 
+    /** After translating, Gemini looks at each finished page and fixes what went wrong. */
+    fun reviewPages(): Boolean = prefs.getBoolean(KEY_REVIEW_PAGES, true)
+
+    fun saveReviewPages(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_REVIEW_PAGES, enabled).apply()
+    }
+
     fun saveGoogleFallback(enabled: Boolean) {
         prefs.edit().putBoolean(KEY_GOOGLE_FALLBACK, enabled).apply()
     }
@@ -247,6 +254,7 @@ class HonyukaPreferences(context: Context) {
         const val KEY_DEEPL_API_KEY = "deepl_api_key"
         const val KEY_FILTER_SOURCES_BY_LANGUAGE = "filter_sources_by_language"
         const val KEY_GOOGLE_FALLBACK = "google_fallback"
+        const val KEY_REVIEW_PAGES = "review_pages"
         const val KEY_AUTO_MANGAS = "auto_translate_mangas"
         const val KEY_AUTO_ENABLED = "auto_translate_enabled"
         const val KEY_AUTO_LAST_RUN = "auto_translate_last_run"

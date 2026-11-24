@@ -335,6 +335,10 @@ class RenderedChapterExporter(
         return extension in IMAGE_EXTENSIONS
     }
 
+    /** The page as it will look translated (any image format), without writing the chapter. */
+    fun previewPage(originalBytes: ByteArray, pageName: String, translation: PageTranslation): ByteArray =
+        renderPage(originalBytes, pageName, translation).bytes
+
     private fun renderPage(
         originalBytes: ByteArray,
         pageName: String,

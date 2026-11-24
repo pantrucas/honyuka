@@ -252,6 +252,27 @@ class HonyukaStorage(
         File(File(context.filesDir, "glossary"), "${buildValidFilename(mangaName)}.json")
 
     /**
+     * Free-text notes about [mangaName] (characters, gender, how they talk, terms) sent to
+     * Gemini with every request. The user edits it; translation runs append new characters.
+     */
+    fun readMangaContext(mangaName: String): String {
+        val file = mangaContextFile(mangaName)
+        if (file.exists()) return runCatching { file.readText() }.getOrDefault("")
+        return MangaContext.starterFor(mangaName)
+    }
+
+    fun writeMangaContext(mangaName: String, text: String) {
+        runCatching {
+            val file = mangaContextFile(mangaName)
+            file.parentFile?.mkdirs()
+            file.writeText(text.trim() + "\n")
+        }
+    }
+
+    private fun mangaContextFile(mangaName: String): File =
+        File(File(context.filesDir, "context"), "${buildValidFilename(mangaName)}.txt")
+
+    /**
      * Load a previously saved translation sidecar for the given chapter.
      * Returns null if no sidecar exists.
      */
