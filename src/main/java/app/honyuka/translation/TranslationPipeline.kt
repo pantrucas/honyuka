@@ -31,6 +31,9 @@ import com.google.mlkit.nl.translate.TranslatorOptions
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
+import app.honyuka.export.BubbleCache
+import app.honyuka.export.BubbleFinder
+import app.honyuka.export.mergeSameBubble
 import com.google.mlkit.vision.text.TextRecognizerOptionsInterface
 import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
 import com.google.mlkit.vision.text.japanese.JapaneseTextRecognizerOptions
@@ -109,7 +112,7 @@ class TranslationPipeline(
                 val bitmap = recognizer.decodeBitmap(bytes, page.name)
                 try {
                     val result = recognizer.recognize(bitmap)
-                    val translation = convertToPageTranslation(result.textBlocks, bitmap.width, bitmap.height)
+                    val translation = convertToPageTranslation(result.textBlocks, bitmap)
                     if (translation.blocks.isNotEmpty()) {
                         pageTranslations[page.name] = translation
                     }
@@ -324,12 +327,14 @@ class TranslationPipeline(
 
     private fun convertToPageTranslation(
         blocks: List<Text.TextBlock>,
-        width: Int,
-        height: Int,
+        bitmap: Bitmap,
     ): PageTranslation {
+        val width = bitmap.width
+        val height = bitmap.height
         val translation = PageTranslation(imgWidth = width.toFloat(), imgHeight = height.toFloat())
         blocks
-            .filter { it.boundingBox != null && it.text.trim().length > 1 }
+            // Single characters are kept for now: a lone "I" usually starts the sentence below it.
+            .filter { it.boundingBox != null && it.text.isNotBlank() }
             .sortedWith(compareBy({ it.boundingBox?.top ?: 0 }, { it.boundingBox?.left ?: 0 }))
             .forEach { block ->
                 val bounds = block.boundingBox ?: return@forEach
@@ -350,6 +355,13 @@ class TranslationPipeline(
                 )
             }
         translation.blocks = smartMergeBlocks(translation.blocks, 50, 30, 30)
+        // Pieces OCR split out of one speech bubble go to the translator as one sentence.
+        runCatching { BubbleCache(BubbleFinder.luminance(bitmap), width, height) }.getOrNull()?.let { bubbles ->
+            translation.blocks = mergeSameBubble(translation.blocks, bubbles) { upper, lower ->
+                mergeTextBlocks(upper, lower)
+            }
+        }
+        translation.blocks = translation.blocks.filter { it.text.trim().length > 1 }.toMutableList()
         return translation
     }
 
@@ -485,6 +497,34 @@ class TranslationPipeline(
         val name: String,
         val openStream: () -> InputStream,
     )
+}
+
+/** A line of text found on a page image, in page pixels. */
+data class OcrLine(
+    val text: String,
+    val left: Float,
+    val top: Float,
+    val right: Float,
+    val bottom: Float,
+)
+
+/** Reads the text lines of finished (translated) pages: the check for leftover English. */
+class PageLineReader(sourceLanguage: SourceLanguage) : Closeable {
+    private val engine = TextRecognitionEngine(sourceLanguage)
+
+    fun read(bytes: ByteArray, pageName: String): List<OcrLine> {
+        val bitmap = engine.decodeBitmap(bytes, pageName)
+        try {
+            return engine.recognize(bitmap).textBlocks.flatMap { it.lines }.mapNotNull { line ->
+                val box = line.boundingBox ?: return@mapNotNull null
+                OcrLine(line.text, box.left.toFloat(), box.top.toFloat(), box.right.toFloat(), box.bottom.toFloat())
+            }
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    override fun close() = engine.close()
 }
 
 private class TextRecognitionEngine(
@@ -1624,7 +1664,7 @@ private fun httpPostJson(
 ): String {
     val connection = URL(url).openConnection() as HttpURLConnection
     connection.connectTimeout = 20_000
-    connection.readTimeout = 60_000
+    connection.readTimeout = 180_000 // Gemini reading several pages can think for over a minute
     connection.requestMethod = "POST"
     connection.doOutput = true
     connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")

@@ -2,6 +2,7 @@ package app.honyuka.service
 
 import android.content.Context
 import android.os.PowerManager
+import android.util.Log
 import app.honyuka.data.HonyukaPreferences
 import app.honyuka.data.HonyukaStorage
 import app.honyuka.data.MangaContext
@@ -12,8 +13,11 @@ import app.honyuka.model.LocalModel
 import app.honyuka.model.PageTranslation
 import app.honyuka.model.SourceLanguage
 import app.honyuka.model.TargetLanguage
+import app.honyuka.model.TranslationBlock
 import app.honyuka.model.TranslationEngine
 import app.honyuka.translation.GeminiVisionEngine
+import app.honyuka.translation.PageLineReader
+import app.honyuka.translation.TranslationStop
 import app.honyuka.translation.TranslationPipeline
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -109,7 +113,9 @@ class ChapterTranslator(private val context: Context) {
                     error("Review needs the Gemini translator and its API key.")
                 }
                 @Suppress("UNCHECKED_CAST")
-                reviewPages(chapter, chapterDocument, settings, translations as MutableMap<String, PageTranslation>, onProgress)
+                val editable = translations as MutableMap<String, PageTranslation>
+                checkLeftovers(chapter, chapterDocument, settings, editable, onProgress)
+                reviewPages(chapter, chapterDocument, settings, editable, onProgress)
                 untranslated = translations.values.sumOf { page -> page.blocks.count { it.needsTranslation() } }
             }
         } else {
@@ -199,6 +205,9 @@ class ChapterTranslator(private val context: Context) {
                 onProgress("Saving translation", chapter.chapterDisplayName, 0.95f)
                 storage.writeTranslation(chapter, translations)
 
+                // Free and offline: find English the boxes didn't cover, before Gemini's review.
+                checkLeftovers(chapter, chapterDocument, settings, mutableTranslations, onProgress, pageImage)
+
                 if (settings.engine == TranslationEngine.GEMINI && preferences.reviewPages()) {
                     reviewPages(chapter, chapterDocument, settings, mutableTranslations, onProgress, pageImage)
                 }
@@ -267,7 +276,50 @@ class ChapterTranslator(private val context: Context) {
         changes
     }
 
+    /**
+     * Renders every translated page, reads it again with the phone's OCR and fixes what is
+     * still in the original language (see [LeftoverCheck]). Costs no Gemini requests.
+     * Never fails the run: any problem just skips the check.
+     */
+    private suspend fun checkLeftovers(
+        chapter: ChapterEntry,
+        chapterDocument: androidx.documentfile.provider.DocumentFile,
+        settings: TranslationSettings,
+        translations: MutableMap<String, PageTranslation>,
+        onProgress: (title: String, detail: String, progress: Float) -> Unit,
+        loadedImages: ((String) -> ByteArray?)? = null,
+    ): Int = withContext(Dispatchers.IO) {
+        var changes = 0
+        runCatching {
+            val pageImage = loadedImages ?: pipeline.pageImageLoader(chapter, chapterDocument)
+            val pages = translations.entries.filter { (_, page) ->
+                page.blocks.any { it.mode != TranslationBlock.MODE_KEEP && !it.needsTranslation() }
+            }
+            PageLineReader(settings.sourceLanguage).use { reader ->
+                pages.forEachIndexed { index, (name, page) ->
+                    if (TranslationStop.requested) return@use
+                    onProgress(
+                        "Checking pages",
+                        "${chapter.chapterDisplayName}: page ${index + 1} of ${pages.size}",
+                        0.95f,
+                    )
+                    val original = pageImage(name) ?: return@forEachIndexed
+                    // Twice at most: a grown box can uncover the next leftover line.
+                    for (pass in 0 until 2) {
+                        val (bytes, drawn) = exporter.previewWithText(original, name, page)
+                        val fixed = LeftoverCheck.apply(page, reader.read(bytes, name), drawn)
+                        changes += fixed
+                        if (fixed == 0) break
+                    }
+                }
+            }
+        }.onFailure { Log.w(TAG, "Leftover check skipped", it) }
+        if (changes > 0) storage.writeTranslation(chapter, translations)
+        changes
+    }
+
     private companion object {
+        const val TAG = "ChapterTranslator"
         const val WAKE_LOCK_TIMEOUT_MS = 2 * 60 * 60 * 1000L
     }
 }

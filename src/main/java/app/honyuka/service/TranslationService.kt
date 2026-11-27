@@ -163,19 +163,19 @@ class TranslationService : Service() {
                 is ChapterRunOutcome.Completed -> {
                     val warning = outcome.warning
                     if (warning == null) {
-                        updateNotification("Completed ✓", chapter.chapterDisplayName, 100)
+                        showResult("Completed ✓", chapter.chapterDisplayName)
                     } else {
-                        updateNotification("Completed with warnings", "${chapter.chapterDisplayName}: $warning", 100)
+                        showResult("Completed with warnings", "${chapter.chapterDisplayName}: $warning")
                     }
                     broadcastResult(chapter, success = true, warning = warning)
                 }
             }
         } catch (e: TranslationStoppedException) {
-            updateNotification("Stopped", e.message.orEmpty(), 0)
+            showResult("Stopped", "${chapter.chapterDisplayName}: ${e.message.orEmpty()}")
             broadcastResult(chapter, success = false, error = e.message)
         } catch (e: Exception) {
             Log.e(TAG, "Translation failed for ${chapter.storageKey}", e)
-            updateNotification("Translation failed", e.message ?: "Unknown error", 0)
+            showResult("Translation failed", "${chapter.chapterDisplayName}: ${e.message ?: "Unknown error"}")
             broadcastResult(chapter, success = false, error = e.message)
         } finally {
             runStatus.value = null
@@ -192,6 +192,33 @@ class TranslationService : Service() {
         TranslationStop.request()
         runStatus.update { it?.copy(stopping = true, detail = "Stopping…") }
         updateNotification("Stopping…", currentChapter?.chapterDisplayName.orEmpty(), 0)
+    }
+
+    /**
+     * The final outcome goes in its own notification: the progress one is removed together with
+     * the service, which used to wipe the error message before anyone could read it.
+     */
+    private fun showResult(title: String, detail: String) {
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val tapIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            this, 2, tapIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        nm.notify(
+            RESULT_NOTIFICATION_ID,
+            NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle(title)
+                .setContentText(detail)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(detail))
+                .setSmallIcon(R.drawable.ic_notification)
+                .setContentIntent(pendingIntent)
+                .setAutoCancel(true)
+                .setOnlyAlertOnce(true)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .build(),
+        )
     }
 
     private fun updateNotification(title: String, detail: String, progress: Int) {
@@ -281,6 +308,7 @@ class TranslationService : Service() {
         private const val TAG = "TranslationService"
         private const val CHANNEL_ID = "honyuka_translation"
         private const val NOTIFICATION_ID = 42
+        private const val RESULT_NOTIFICATION_ID = 43
 
         const val ACTION_PROGRESS = "app.honyuka.TRANSLATION_PROGRESS"
         const val ACTION_RESULT = "app.honyuka.TRANSLATION_RESULT"

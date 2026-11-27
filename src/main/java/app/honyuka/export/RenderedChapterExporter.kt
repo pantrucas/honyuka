@@ -339,6 +339,24 @@ class RenderedChapterExporter(
     fun previewPage(originalBytes: ByteArray, pageName: String, translation: PageTranslation): ByteArray =
         renderPage(originalBytes, pageName, translation).bytes
 
+    /** The rendered page plus where each translation was drawn (for the leftover check). */
+    fun previewWithText(
+        originalBytes: ByteArray,
+        pageName: String,
+        translation: PageTranslation,
+    ): Pair<ByteArray, List<DrawnText>> = renderPage(originalBytes, pageName, translation).let { it.bytes to it.drawn }
+
+    /**
+     * One translation as drawn: [textRect] holds the new text; [area] is what was cleaned
+     * (the whole bubble when [inBubble], otherwise the box around the original text).
+     */
+    class DrawnText(
+        val text: String,
+        val textRect: RectF,
+        val area: RectF,
+        val inBubble: Boolean,
+    )
+
     private fun renderPage(
         originalBytes: ByteArray,
         pageName: String,
@@ -365,14 +383,29 @@ class RenderedChapterExporter(
         val outputFormat = outputFormatForPage(pageName)
         try {
             val canvas = Canvas(bitmap)
-            val mergedBlocks = mergeOverlappingRenderBlocks(drawableBlocks)
-            val renderPlans = buildRenderPlans(mergedBlocks, bitmap.width, bitmap.height, bitmap)
-            renderPlans.forEach { plan -> cleanupSourceText(bitmap, canvas, plan) }
+            val bubbles = BubbleCache(BubbleFinder.luminance(bitmap), bitmap.width, bitmap.height)
+            // Sound effects kept as drawn and lines not translated yet must survive bubble cleanup.
+            val protectedRects = translation.blocks
+                .filter { it.mode == TranslationBlock.MODE_KEEP || it.needsTranslation() }
+                .map { RectF(it.x - 2f, it.y - 2f, it.x + it.width + 2f, it.y + it.height + 2f) }
+            val mergedBlocks = mergeOverlappingRenderBlocks(mergeSameBubbleBlocks(drawableBlocks, bubbles))
+            val renderPlans = buildRenderPlans(mergedBlocks, bitmap.width, bitmap.height, bitmap, bubbles)
+            renderPlans.forEach { plan -> cleanupSourceText(bitmap, canvas, plan, protectedRects) }
             renderPlans.filter { it.hasText }.forEach { plan -> drawTranslationBackground(canvas, plan) }
             renderPlans.filter { it.hasText }.forEach { plan -> drawTranslationText(canvas, plan) }
             return RenderedPage(
                 fileName = translatedPageName(pageName, outputFormat),
                 bytes = compressBitmap(bitmap, outputFormat),
+                drawn = renderPlans.map { plan ->
+                    DrawnText(
+                        text = if (plan.hasText) plan.fillLayout.text.toString() else "",
+                        textRect = RectF(plan.occupiedTextRect),
+                        area = plan.bubble?.let {
+                            RectF(it.left.toFloat(), it.top.toFloat(), it.right.toFloat(), it.bottom.toFloat())
+                        } ?: RectF(plan.cleanupRect),
+                        inBubble = plan.bubble != null,
+                    )
+                },
             )
         } finally {
             bitmap.recycle()
@@ -454,16 +487,28 @@ class RenderedChapterExporter(
         )
     }
 
+    /**
+     * OCR often splits one bubble into pieces ("THE" / "WORLD?!"). Pieces in the same bubble
+     * that sit right above or below each other are joined, so the translation is laid out
+     * once across the bubble instead of in scattered little boxes.
+     */
+    private fun mergeSameBubbleBlocks(
+        blocks: List<TranslationBlock>,
+        bubbles: BubbleCache,
+    ): List<TranslationBlock> = mergeSameBubble(blocks, bubbles) { a, b -> mergeRenderBlocks(a, b) }
+
     private fun buildRenderPlans(
         blocks: List<TranslationBlock>,
         pageWidth: Int,
         pageHeight: Int,
         sampleBitmap: Bitmap,
+        bubbles: BubbleCache? = null,
     ): List<RenderedBlockPlan> {
         val plans = mutableListOf<RenderedBlockPlan>()
         val occupiedTextRegions = mutableListOf<RectF>()
         blocks.forEach { block ->
-            buildCollisionAwarePlan(block, pageWidth, pageHeight, occupiedTextRegions, sampleBitmap)?.let { plan ->
+            val bubble = bubbles?.of(block)
+            buildCollisionAwarePlan(block, pageWidth, pageHeight, occupiedTextRegions, sampleBitmap, bubble)?.let { plan ->
                 plans += plan
                 occupiedTextRegions += plan.occupiedTextRect
             }
@@ -477,15 +522,16 @@ class RenderedChapterExporter(
         pageHeight: Int,
         occupiedTextRegions: List<RectF>,
         sampleBitmap: Bitmap,
+        bubble: Bubble? = null,
     ): RenderedBlockPlan? {
         val cleanupRect = buildCleanupRect(block)
         val regionStyle = sampleRegionStyle(sampleBitmap, cleanupRect)
         if (block.translation.isBlank()) {
             // Its words were moved into a neighbouring bubble: erase only.
-            return cleanupOnlyPlan(cleanupRect, regionStyle, block)
+            return cleanupOnlyPlan(cleanupRect, regionStyle, block).copy(bubble = bubble)
         }
 
-        val placementRect = buildPlacementRect(block)
+        val placementRect = bubble?.let { bubblePlacementRect(block, it) } ?: buildPlacementRect(block)
         val candidateDeltas = buildCandidateDeltas(
             basePlacementRect = placementRect,
             block = block,
@@ -507,7 +553,7 @@ class RenderedChapterExporter(
                     placementRect = placementRect.shifted(dx, dy),
                     textScale = textScale,
                     style = regionStyle,
-                )
+                ).copy(bubble = bubble)
                 val overlapArea = occupiedTextRegions.sumOf { occupied ->
                     plan.occupiedTextRect.overlapAreaWith(occupied).toDouble()
                 }.toFloat()
@@ -547,11 +593,7 @@ class RenderedChapterExporter(
     }
 
     /** Height of one original capital letter, robust to a tiny first symbol such as "…". */
-    private fun originalGlyphHeight(block: TranslationBlock): Float {
-        val lines = block.text.count { it == '\n' } + 1
-        val perLine = block.height / lines
-        return max(block.symHeight, perLine * 0.7f).coerceAtMost(perLine.coerceAtLeast(1f))
-    }
+    private fun originalGlyphHeight(block: TranslationBlock): Float = letterHeight(block)
 
     private fun buildBlockPlan(
         block: TranslationBlock,
@@ -611,11 +653,63 @@ class RenderedChapterExporter(
         )
     }
 
+    /**
+     * The biggest box around the text that still fits in its bubble, minus a margin, so the
+     * translation uses the bubble's width instead of the few lines OCR happened to read.
+     */
+    private fun bubblePlacementRect(block: TranslationBlock, bubble: Bubble): RectF {
+        val grown = bubble.growInside(
+            block.x.toInt(),
+            block.y.toInt(),
+            (block.x + block.width).roundToInt(),
+            (block.y + block.height).roundToInt(),
+        )
+        val margin = max(3f, originalGlyphHeight(block) * 0.35f)
+        val inner = RectF(grown[0] + margin, grown[1] + margin, grown[2] - margin, grown[3] - margin)
+        return RectF(
+            min(inner.left, block.x),
+            min(inner.top, block.y),
+            max(inner.right, block.x + block.width),
+            max(inner.bottom, block.y + block.height),
+        )
+    }
+
+    /** Repaints the bubble's paper over every letter in it, read by OCR or not. */
+    private fun paintBubble(
+        bitmap: Bitmap,
+        bubble: Bubble,
+        color: Int,
+        protectedRects: List<RectF>,
+    ) {
+        val pixels = IntArray(bubble.width * bubble.height)
+        bitmap.getPixels(pixels, 0, bubble.width, bubble.left, bubble.top, bubble.width, bubble.height)
+        val guards = protectedRects.filter { rect ->
+            rect.right >= bubble.left && rect.left <= bubble.right && rect.bottom >= bubble.top && rect.top <= bubble.bottom
+        }
+        for (y in 0 until bubble.height) {
+            val py = (bubble.top + y).toFloat()
+            for (x in 0 until bubble.width) {
+                val i = y * bubble.width + x
+                if (!bubble.paint[i]) continue
+                val px = (bubble.left + x).toFloat()
+                if (guards.any { px >= it.left && px <= it.right && py >= it.top && py <= it.bottom }) continue
+                pixels[i] = color
+            }
+        }
+        bitmap.setPixels(pixels, 0, bubble.width, bubble.left, bubble.top, bubble.width, bubble.height)
+    }
+
     private fun cleanupSourceText(
         bitmap: Bitmap,
         canvas: Canvas,
         plan: RenderedBlockPlan,
+        protectedRects: List<RectF> = emptyList(),
     ) {
+        plan.bubble?.let { bubble ->
+            val paper = if (plan.style.isLightBackground) plan.style.cleanupColor else Color.WHITE
+            paintBubble(bitmap, bubble, paper, protectedRects)
+            return
+        }
         if (plan.style.isLightBackground) {
             eraseDarkTextPixels(bitmap, plan.cleanupRect, plan.style.cleanupColor, plan.style.referenceLuminance, plan.glyphHeight)
         } else {
@@ -1506,6 +1600,8 @@ class RenderedChapterExporter(
         val hasText: Boolean = true,
         /** Original letter height, used to size the erase mask. */
         val glyphHeight: Float = 0f,
+        /** The white bubble around the text, when found: wiped whole instead of [cleanupRect]. */
+        val bubble: Bubble? = null,
     )
 
     private data class ExportMetadata(
@@ -1522,6 +1618,7 @@ class RenderedChapterExporter(
     private data class RenderedPage(
         val fileName: String,
         val bytes: ByteArray,
+        val drawn: List<DrawnText> = emptyList(),
     )
 
     private enum class RenderedImageFormat(
